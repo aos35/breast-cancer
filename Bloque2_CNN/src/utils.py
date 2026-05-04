@@ -1,290 +1,514 @@
 """
-Funciones auxiliares para el proyecto de segmentación.
+Utilities Module for Bloque2_CNN
+Loss functions, metrics, and helper functions for training and evaluation
 """
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 from sklearn.metrics import (
-    jaccard_score,
-    f1_score,
-    precision_score,
-    recall_score,
-    accuracy_score
+    accuracy_score, precision_score, recall_score, f1_score,
+    roc_auc_score, confusion_matrix, roc_curve
 )
+import numpy as np
+from typing import Dict, Tuple
 
 
 # ============================================================================
-# LOSS FUNCTIONS
+# LOSS FUNCTIONS - CLASSIFICATION
 # ============================================================================
 
-class DiceLoss(torch.nn.Module):
-    """Dice Coefficient Loss - Métrica común en segmentación médica"""
+class ClassificationLoss(nn.Module):
+    """Weighted CrossEntropy loss for handling class imbalance"""
     
-    def __init__(self, smooth=1.0):
-        super().__init__()
+    def __init__(self, class_weights: torch.Tensor = None):
+        """
+        Initialize Classification Loss
+        
+        Args:
+            class_weights: Tensor of shape (num_classes,) for weighted loss
+                         If None, uses default uniform weights
+        """
+        super(ClassificationLoss, self).__init__()
+        self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+    
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate classification loss
+        
+        Args:
+            predictions: (B, num_classes) logits
+            targets: (B,) target class indices
+        
+        Returns:
+            Scalar loss value
+        """
+        return self.criterion(predictions, targets)
+
+
+# ============================================================================
+# LOSS FUNCTIONS - SEGMENTATION
+# ============================================================================
+
+class DiceLoss(nn.Module):
+    """
+    Dice Loss: 1 - 2*(TP)/(2*TP+FP+FN)
+    Excellent for class imbalance (background >> foreground)
+    """
+    
+    def __init__(self, smooth: float = 1e-5):
+        """
+        Initialize Dice Loss
+        
+        Args:
+            smooth: Smoothing constant to avoid division by zero
+        """
+        super(DiceLoss, self).__init__()
         self.smooth = smooth
     
-    def forward(self, predictions, targets):
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
+        Calculate Dice loss
+        
         Args:
-            predictions: (B, 1, H, W)
-            targets: (B, 1, H, W)
+            predictions: (B, 1, H, W) probabilities [0, 1]
+            targets: (B, 1, H, W) ground truth binary [0, 1]
+        
+        Returns:
+            Scalar loss value
         """
-        predictions = torch.sigmoid(predictions)
+        # Flatten
+        pred_flat = predictions.view(-1)
+        target_flat = targets.view(-1)
         
-        intersection = (predictions * targets).sum()
-        dice = (2 * intersection + self.smooth) / (
-            predictions.sum() + targets.sum() + self.smooth
-        )
+        # Calculate intersection and union
+        intersection = (pred_flat * target_flat).sum()
+        union = pred_flat.sum() + target_flat.sum()
         
-        return 1 - dice
+        # Dice coefficient
+        dice_coeff = (2.0 * intersection + self.smooth) / (union + self.smooth)
+        
+        # Loss (1 - Dice)
+        return 1.0 - dice_coeff
 
 
-class IoULoss(torch.nn.Module):
-    """Intersection over Union Loss"""
+class BCEWithLogitsLoss(nn.Module):
+    """Binary Cross Entropy Loss"""
     
-    def __init__(self, smooth=1.0):
-        super().__init__()
-        self.smooth = smooth
+    def __init__(self):
+        super(BCEWithLogitsLoss, self).__init__()
+        self.criterion = nn.BCEWithLogitsLoss()
     
-    def forward(self, predictions, targets):
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """
+        Calculate BCE loss
+        
         Args:
-            predictions: (B, 1, H, W)
-            targets: (B, 1, H, W)
+            predictions: (B, 1, H, W) raw logits
+            targets: (B, 1, H, W) ground truth [0, 1]
+        
+        Returns:
+            Scalar loss value
         """
-        predictions = torch.sigmoid(predictions)
-        
-        intersection = (predictions * targets).sum()
-        union = predictions.sum() + targets.sum() - intersection
-        
-        iou = (intersection + self.smooth) / (union + self.smooth)
-        
-        return 1 - iou
+        return self.criterion(predictions, targets)
 
 
-class CombinedLoss(torch.nn.Module):
-    """Combinación de Dice + BCE Loss"""
+class CombinedSegmentationLoss(nn.Module):
+    """Combined loss: α*DiceLoss + (1-α)*BCELoss"""
     
-    def __init__(self, bce_weight=0.5, dice_weight=0.5):
-        super().__init__()
-        self.bce_weight = bce_weight
-        self.dice_weight = dice_weight
+    def __init__(self, alpha: float = 0.5, smooth: float = 1e-5):
+        """
+        Initialize Combined Loss
         
-        self.bce_loss = torch.nn.BCEWithLogitsLoss()
-        self.dice_loss = DiceLoss()
+        Args:
+            alpha: Weight for Dice loss (1-alpha for BCE)
+            smooth: Smoothing constant
+        """
+        super(CombinedSegmentationLoss, self).__init__()
+        self.alpha = alpha
+        self.dice_loss = DiceLoss(smooth=smooth)
+        self.bce_loss = BCEWithLogitsLoss()
     
-    def forward(self, predictions, targets):
+    def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Calculate combined loss
+        
+        Args:
+            predictions: (B, 1, H, W) raw logits
+            targets: (B, 1, H, W) ground truth [0, 1]
+        
+        Returns:
+            Scalar loss value
+        """
+        # Sigmoid for Dice loss
+        pred_sigmoid = torch.sigmoid(predictions)
+        
+        dice = self.dice_loss(pred_sigmoid, targets)
         bce = self.bce_loss(predictions, targets)
-        dice = self.dice_loss(predictions, targets)
         
-        return self.bce_weight * bce + self.dice_weight * dice
+        return self.alpha * dice + (1 - self.alpha) * bce
 
 
 # ============================================================================
-# EVALUATION METRICS
+# METRICS - CLASSIFICATION
 # ============================================================================
 
-class SegmentationMetrics:
-    """Calcula métricas de segmentación"""
-    
-    @staticmethod
-    def compute_iou(predictions, targets, threshold=0.5):
-        """Intersection over Union"""
-        pred_binary = (predictions > threshold).astype(np.int32)
-        target_binary = targets.astype(np.int32)
-        
-        intersection = np.logical_and(pred_binary, target_binary).sum()
-        union = np.logical_or(pred_binary, target_binary).sum()
-        
-        if union == 0:
-            return 1.0 if intersection == 0 else 0.0
-        
-        return intersection / union
-    
-    @staticmethod
-    def compute_dice(predictions, targets, threshold=0.5):
-        """Dice Coefficient"""
-        pred_binary = (predictions > threshold).astype(np.int32)
-        target_binary = targets.astype(np.int32)
-        
-        intersection = np.logical_and(pred_binary, target_binary).sum()
-        dice = 2 * intersection / (pred_binary.sum() + target_binary.sum() + 1e-6)
-        
-        return dice
-    
-    @staticmethod
-    def compute_metrics(predictions, targets, threshold=0.5):
-        """Calcula todas las métricas"""
-        pred_binary = (predictions > threshold).astype(np.int32).flatten()
-        target_binary = targets.astype(np.int32).flatten()
-        
-        metrics = {
-            'iou': jaccard_score(target_binary, pred_binary),
-            'dice': f1_score(target_binary, pred_binary),
-            'precision': precision_score(target_binary, pred_binary, zero_division=0),
-            'recall': recall_score(target_binary, pred_binary, zero_division=0),
-            'accuracy': accuracy_score(target_binary, pred_binary),
-        }
-        
-        # F1 score = 2 * (precision * recall) / (precision + recall)
-        if metrics['precision'] + metrics['recall'] > 0:
-            metrics['f1'] = 2 * (metrics['precision'] * metrics['recall']) / \
-                           (metrics['precision'] + metrics['recall'])
-        else:
-            metrics['f1'] = 0.0
-        
-        return metrics
-
-
-# ============================================================================
-# IMAGE PROCESSING
-# ============================================================================
-
-def apply_morphological_operations(mask, operation='closing', kernel_size=5):
+def classification_metrics(predictions: torch.Tensor,
+                          targets: torch.Tensor,
+                          class_names: list = None) -> Dict:
     """
-    Aplica operaciones morfológicas a la máscara.
+    Calculate comprehensive classification metrics
     
     Args:
-        mask: Máscara binaria (0-1)
-        operation: 'closing', 'opening', 'dilation', 'erosion'
-        kernel_size: Tamaño del kernel
+        predictions: (B, num_classes) logits
+        targets: (B,) target indices
+        class_names: List of class names for reporting
+    
+    Returns:
+        Dict with metrics
     """
-    import cv2
+    # Convert to numpy
+    preds_np = predictions.detach().cpu().numpy()
+    targets_np = targets.detach().cpu().numpy()
     
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    # Get class predictions
+    pred_classes = np.argmax(preds_np, axis=1)
     
-    if operation == 'closing':
-        return cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-    elif operation == 'opening':
-        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    elif operation == 'dilation':
-        return cv2.dilate(mask, kernel)
-    elif operation == 'erosion':
-        return cv2.erode(mask, kernel)
-    else:
-        raise ValueError(f"Operación no reconocida: {operation}")
-
-
-def post_process_mask(mask, min_area=100):
-    """
-    Post-procesa máscara predicha.
+    # Get probabilities
+    pred_probs = torch.softmax(predictions, dim=1).detach().cpu().numpy()
     
-    Args:
-        mask: Máscara predicha (0-1)
-        min_area: Área mínima para conservar componentes
-    """
-    import cv2
+    # Accuracy
+    accuracy = accuracy_score(targets_np, pred_classes)
     
-    # Binarizar
-    binary_mask = (mask > 0.5).astype(np.uint8) * 255
+    # Per-class metrics
+    precision = precision_score(targets_np, pred_classes, average=None, zero_division=0)
+    recall = recall_score(targets_np, pred_classes, average=None, zero_division=0)
+    f1 = f1_score(targets_np, pred_classes, average=None, zero_division=0)
     
-    # Encontrar componentes conectados
-    num_labels, labels = cv2.connectedComponents(binary_mask)
+    # Weighted averages
+    precision_weighted = precision_score(targets_np, pred_classes, average='weighted', zero_division=0)
+    recall_weighted = recall_score(targets_np, pred_classes, average='weighted', zero_division=0)
+    f1_weighted = f1_score(targets_np, pred_classes, average='weighted', zero_division=0)
     
-    # Filtrar por área
-    output = np.zeros_like(binary_mask)
-    for label in range(1, num_labels):
-        component_mask = (labels == label).astype(np.uint8) * 255
-        if np.sum(component_mask) >= min_area:
-            output += component_mask
+    # AUC-ROC (one-vs-rest for multi-class)
+    try:
+        auc_roc = roc_auc_score(targets_np, pred_probs, multi_class='ovr', average='weighted')
+    except:
+        auc_roc = 0.0
     
-    return (output > 0).astype(np.float32)
-
-
-# ============================================================================
-# VISUALIZATION
-# ============================================================================
-
-def visualize_segmentation(image, mask, prediction, save_path=None):
-    """
-    Visualiza imagen, máscara ground-truth y predicción.
+    # Confusion matrix
+    cm = confusion_matrix(targets_np, pred_classes)
     
-    Args:
-        image: Imagen original (escala de grises, 0-1)
-        mask: Máscara ground-truth (0-1)
-        prediction: Predicción (0-1)
-        save_path: Ruta para guardar (opcional)
-    """
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    
-    fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    
-    # Imagen original
-    axes[0].imshow(image, cmap='gray')
-    axes[0].set_title('Imagen Original')
-    axes[0].axis('off')
-    
-    # Ground truth
-    axes[1].imshow(image, cmap='gray')
-    axes[1].imshow(mask, cmap='Reds', alpha=0.5)
-    axes[1].set_title('Ground Truth')
-    axes[1].axis('off')
-    
-    # Predicción
-    axes[2].imshow(image, cmap='gray')
-    axes[2].imshow(prediction, cmap='Greens', alpha=0.5)
-    axes[2].set_title('Predicción')
-    axes[2].axis('off')
-    
-    # Diferencia
-    diff = np.abs(mask - prediction)
-    axes[3].imshow(diff, cmap='jet')
-    axes[3].set_title('Diferencia (abs)')
-    axes[3].axis('off')
-    
-    plt.tight_layout()
-    
-    if save_path:
-        plt.savefig(save_path, dpi=100, bbox_inches='tight')
-    
-    return fig
-
-
-# ============================================================================
-# UTILITIES
-# ============================================================================
-
-def create_directory(path):
-    """Crea directorio si no existe"""
-    from pathlib import Path
-    Path(path).mkdir(parents=True, exist_ok=True)
-
-
-def load_config(config_path):
-    """Carga configuración desde YAML"""
-    import yaml
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    return config
-
-
-def save_checkpoint(model, optimizer, epoch, metrics, save_path):
-    """Guarda checkpoint del modelo"""
-    checkpoint = {
-        'epoch': epoch,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'metrics': metrics,
+    # Build results dictionary
+    results = {
+        'accuracy': accuracy,
+        'precision_weighted': precision_weighted,
+        'recall_weighted': recall_weighted,
+        'f1_weighted': f1_weighted,
+        'auc_roc': auc_roc,
+        'confusion_matrix': cm.tolist()
     }
-    torch.save(checkpoint, save_path)
-
-
-def load_checkpoint(model, optimizer, load_path):
-    """Carga checkpoint del modelo"""
-    checkpoint = torch.load(load_path)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    epoch = checkpoint['epoch']
-    metrics = checkpoint.get('metrics', {})
+    # Per-class metrics
+    if class_names is None:
+        class_names = [f'Class_{i}' for i in range(len(precision))]
     
-    return model, optimizer, epoch, metrics
+    for i, class_name in enumerate(class_names):
+        results[f'{class_name}_precision'] = precision[i]
+        results[f'{class_name}_recall'] = recall[i]
+        results[f'{class_name}_f1'] = f1[i]
+    
+    return results
 
 
-if __name__ == "__main__":
-    print("✓ Utilidades de segmentación cargadas")
+# ============================================================================
+# METRICS - SEGMENTATION
+# ============================================================================
+
+def segmentation_metrics(predictions: torch.Tensor,
+                        targets: torch.Tensor,
+                        threshold: float = 0.5) -> Dict:
+    """
+    Calculate segmentation metrics
+    
+    Args:
+        predictions: (B, 1, H, W) probabilities [0, 1]
+        targets: (B, 1, H, W) ground truth binary [0, 1]
+        threshold: Probability threshold for binarization
+    
+    Returns:
+        Dict with metrics
+    """
+    # Convert to numpy
+    pred_np = predictions.detach().cpu().numpy()
+    target_np = targets.detach().cpu().numpy()
+    
+    # Binarize predictions
+    pred_binary = (pred_np > threshold).astype(np.float32)
+    
+    # Flatten
+    pred_flat = pred_binary.flatten()
+    target_flat = target_np.flatten()
+    
+    # Calculate metrics
+    tp = np.sum((pred_flat == 1) & (target_flat == 1))
+    tn = np.sum((pred_flat == 0) & (target_flat == 0))
+    fp = np.sum((pred_flat == 1) & (target_flat == 0))
+    fn = np.sum((pred_flat == 0) & (target_flat == 1))
+    
+    # Dice Score
+    dice = (2.0 * tp) / (2.0 * tp + fp + fn + 1e-7)
+    
+    # Jaccard/IoU
+    iou = tp / (tp + fp + fn + 1e-7)
+    
+    # Accuracy
+    accuracy = (tp + tn) / (tp + tn + fp + fn + 1e-7)
+    
+    # Sensitivity (Recall)
+    sensitivity = tp / (tp + fn + 1e-7)
+    
+    # Specificity
+    specificity = tn / (tn + fp + 1e-7)
+    
+    # Precision
+    precision = tp / (tp + fp + 1e-7)
+    
+    # Hausdorff distance (simple approximation)
+    hausdorff = compute_hausdorff_distance(pred_binary, target_np)
+    
+    return {
+        'dice': float(dice),
+        'iou': float(iou),
+        'accuracy': float(accuracy),
+        'sensitivity': float(sensitivity),
+        'specificity': float(specificity),
+        'precision': float(precision),
+        'hausdorff': hausdorff
+    }
+
+
+def compute_hausdorff_distance(pred: np.ndarray, target: np.ndarray) -> float:
+    """
+    Compute Hausdorff distance between prediction and target
+    
+    Args:
+        pred: Binary prediction (B, 1, H, W)
+        target: Binary target (B, 1, H, W)
+    
+    Returns:
+        Mean Hausdorff distance
+    """
+    from scipy.spatial.distance import directed_hausdorff
+    
+    distances = []
+    
+    for b in range(pred.shape[0]):
+        # Get contours
+        pred_coords = np.where(pred[b, 0] > 0.5)
+        target_coords = np.where(target[b, 0] > 0.5)
+        
+        if len(pred_coords[0]) == 0 or len(target_coords[0]) == 0:
+            continue
+        
+        # Stack coordinates
+        pred_pts = np.column_stack(pred_coords)
+        target_pts = np.column_stack(target_coords)
+        
+        # Hausdorff distance
+        hd = max(
+            directed_hausdorff(pred_pts, target_pts)[0],
+            directed_hausdorff(target_pts, pred_pts)[0]
+        )
+        distances.append(hd)
+    
+    return float(np.mean(distances)) if distances else 0.0
+
+
+# ============================================================================
+# METRICS - DETECTION
+# ============================================================================
+
+def compute_iou(box1: torch.Tensor, box2: torch.Tensor) -> float:
+    """
+    Compute IoU (Intersection over Union) between two boxes
+    
+    Args:
+        box1: [x_min, y_min, x_max, y_max]
+        box2: [x_min, y_min, x_max, y_max]
+    
+    Returns:
+        IoU value (0-1)
+    """
+    # Intersection area
+    x_min_inter = max(box1[0], box2[0])
+    y_min_inter = max(box1[1], box2[1])
+    x_max_inter = min(box1[2], box2[2])
+    y_max_inter = min(box1[3], box2[3])
+    
+    if x_max_inter < x_min_inter or y_max_inter < y_min_inter:
+        return 0.0
+    
+    intersection = (x_max_inter - x_min_inter) * (y_max_inter - y_min_inter)
+    
+    # Union area
+    area1 = (box1[2] - box1[0]) * (box1[3] - box1[1])
+    area2 = (box2[2] - box2[0]) * (box2[3] - box2[1])
+    union = area1 + area2 - intersection
+    
+    return intersection / (union + 1e-7)
+
+
+def detection_metrics(pred_boxes: list, pred_scores: list,
+                     gt_boxes: list, iou_threshold: float = 0.5) -> Dict:
+    """
+    Calculate detection metrics
+    
+    Args:
+        pred_boxes: List of predicted boxes (N, 4)
+        pred_scores: List of prediction scores (N,)
+        gt_boxes: List of ground truth boxes (M, 4)
+        iou_threshold: IoU threshold for TP/FP determination
+    
+    Returns:
+        Dict with metrics
+    """
+    # Sort by confidence
+    if len(pred_scores) == 0:
+        return {'precision': 0.0, 'recall': 0.0, 'map': 0.0, 'iou_mean': 0.0}
+    
+    sorted_indices = sorted(range(len(pred_scores)), key=lambda i: pred_scores[i], reverse=True)
+    
+    # Compute TP/FP
+    tp = 0
+    fp = 0
+    ious = []
+    
+    gt_matched = set()
+    
+    for idx in sorted_indices:
+        pred_box = pred_boxes[idx]
+        
+        # Find best matching GT box
+        best_iou = 0
+        best_gt_idx = -1
+        
+        for gt_idx, gt_box in enumerate(gt_boxes):
+            if gt_idx in gt_matched:
+                continue
+            
+            iou = compute_iou(pred_box, gt_box)
+            if iou > best_iou:
+                best_iou = iou
+                best_gt_idx = gt_idx
+        
+        if best_iou >= iou_threshold:
+            tp += 1
+            ious.append(best_iou)
+            gt_matched.add(best_gt_idx)
+        else:
+            fp += 1
+    
+    fn = len(gt_boxes) - tp
+    
+    # Calculate metrics
+    precision = tp / (tp + fp + 1e-7)
+    recall = tp / (tp + fn + 1e-7)
+    
+    # mAP (simplified)
+    map_score = (precision + recall) / 2.0 if (tp + fp + fn) > 0 else 0.0
+    
+    iou_mean = float(np.mean(ious)) if ious else 0.0
+    
+    return {
+        'precision': precision,
+        'recall': recall,
+        'map': map_score,
+        'iou_mean': iou_mean,
+        'tp': tp,
+        'fp': fp,
+        'fn': fn
+    }
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_class_weights(class_counts: Dict[int, int], num_classes: int) -> torch.Tensor:
+    """
+    Calculate balanced class weights for weighted loss
+    
+    Args:
+        class_counts: Dict with class_idx -> count
+        num_classes: Total number of classes
+    
+    Returns:
+        Tensor of weights
+    """
+    total = sum(class_counts.values())
+    weights = []
+    
+    for i in range(num_classes):
+        count = class_counts.get(i, 1)
+        weight = total / (num_classes * max(count, 1))
+        weights.append(weight)
+    
+    # Normalize
+    weights = torch.tensor(weights, dtype=torch.float32)
+    weights = weights / weights.sum() * num_classes
+    
+    return weights
+
+
+def normalize_image(image: np.ndarray) -> np.ndarray:
+    """
+    Normalize image to [0, 1]
+    
+    Args:
+        image: Input image
+    
+    Returns:
+        Normalized image
+    """
+    img_min = image.min()
+    img_max = image.max()
+    
+    if img_max == img_min:
+        return np.zeros_like(image, dtype=np.float32)
+    
+    return ((image - img_min) / (img_max - img_min)).astype(np.float32)
+
+
+def postprocess_segmentation(mask: np.ndarray,
+                            threshold: float = 0.5,
+                            min_size: int = 50) -> np.ndarray:
+    """
+    Post-process segmentation mask
+    
+    Args:
+        mask: Raw mask probabilities
+        threshold: Binarization threshold
+        min_size: Minimum object size
+    
+    Returns:
+        Post-processed binary mask
+    """
+    from scipy import ndimage
+    
+    # Binarize
+    binary = (mask > threshold).astype(np.uint8)
+    
+    # Morphological closing
+    kernel = ndimage.generate_binary_structure(2, 1)
+    binary = ndimage.binary_closing(binary, structure=kernel).astype(np.uint8)
+    
+    # Remove small objects
+    labeled, num_features = ndimage.label(binary)
+    
+    for i in range(1, num_features + 1):
+        size = np.sum(labeled == i)
+        if size < min_size:
+            binary[labeled == i] = 0
+    
+    return binary.astype(np.float32)

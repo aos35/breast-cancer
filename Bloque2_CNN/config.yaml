@@ -1,207 +1,274 @@
-# Configuración para Bloque2_CNN - Segmentación de Lesiones Mamarias
+# Configuration File for Bloque2_CNN - Multi-Task Breast Cancer Detection Pipeline
+# May 2026
 
-# ============================================================================
-# DATASET CONFIGURATION
-# ============================================================================
-dataset:
-  # Ruta del dataset DMID_PNG (ajustar según tu sistema)
-  # Windows: ../../data/raw/DMID_PNG
-  # Linux/Mac: ../../data/raw/DMID_PNG
-  base_path: "../../data/raw/DMID_PNG"
-  
-  # Resolución a usar: '512x512' o '1024x1024'
-  resolution: "512x512"
-  
-  # Subdirectorios dentro de base_path/{resolution}/
-  tiff_dir: "TIFF"
-  masks_dir: "Masks"
-  pla_dir: "PLA_PNG"  # O "PLA" dependiendo del sistema
-  
-  # División de datos
-  train_split: 0.6      # 60% entrenamiento
-  val_split: 0.2        # 20% validación
-  test_split: 0.2       # 20% test
-  
-  # Random seed para reproducibilidad
-  seed: 42
+---
+project:
+  name: "Bloque2_CNN"
+  description: "Classification + Detection + Segmentation Pipeline for Breast Cancer"
+  version: "1.0"
+  dataset: "DMID (Digital Mammography Image Dataset)"
 
-# ============================================================================
-# DATA AUGMENTATION
-# ============================================================================
-augmentation:
-  enabled: true
+---
+## DATA CONFIGURATION
+data:
+  # Paths (relative to Bloque2_CNN/)
+  tiff_dir: "../../DMID_PNG/"                # Imagen mamografías
+  masks_dir: "../../DMID_PNG/masks/"         # Ground truth segmentación (269 images)
+  pla_dir: "../../DMID_PNG/pla/"             # Pixel-level annotation (269 images)
+  metadata_path: "../../Metadata.xlsx"       # Etiquetas clasificación
   
-  # Transformaciones
-  rotation_degrees: 15        # ±15 grados
-  horizontal_flip: true       # Flip horizontal
-  vertical_flip: true         # Flip vertical
-  zoom_range: [0.8, 1.2]      # 80%-120%
+  # Dataset stats
+  total_images: 511                          # Total TIFF images
+  annotated_images: 269                      # Con Mask + PLA
+  metadata_records: 647                      # Instancias en metadata
+  unique_images: 510                         # Imágenes únicas
   
-  # Elastic deformations (común en datos médicos)
-  elastic_deform: true
-  elastic_alpha: [30, 40]
-  elastic_sigma: 3
+  # Class distribution
+  class_distribution:
+    benign: 0.391                            # 39.1%
+    malignant: 0.244                         # 24.4%
+    no_defined: 0.056                        # 5.6%
+    negative: 0.309                          # 30.9% (no tumor)
   
-  # Ruido y blur
-  gaussian_noise: 0.01        # σ=0.01
-  elastic_probability: 0.3    # 30% de probabilidad
+  # Image specs
+  image_shape: [512, 512]                    # Resolución TIFF
+  image_channels: 1                          # Escala gris (mamografía)
   
-  # Normalización
-  normalize: true
-  mean: [0.5]                 # Para imágenes en escala de grises
-  std: [0.5]
+  # Data split (estratificado por clase)
+  train_split: 0.60                          # 60% training
+  val_split: 0.20                            # 20% validation
+  test_split: 0.20                           # 20% testing
+  
+  # Data augmentation
+  augmentation:
+    enabled: true
+    intensity_augment: true                  # Brightness/contrast
+    spatial_augment: true                    # Rotación, zoom, flip
+    elastic_augment: false                   # Solo para segmentación
+  
+  augmentation_params:
+    rotation_range: [-15, 15]                # Grados
+    zoom_range: [0.8, 1.2]                   # Factor
+    horizontal_flip: true
+    vertical_flip: false                     # NO para mamografía
+    intensity_scale: [-0.1, 0.1]             # ±10%
+    noise_std: 0.02                          # Gaussian noise
+    elastic_alpha: 30                        # Para elastic deformations
+    elastic_sigma: 5
 
-# ============================================================================
-# MODEL CONFIGURATION
-# ============================================================================
-model:
-  # Tipo de modelo: 'unet', 'segnet', 'deeplabv3'
-  # (ver ARQUITECTURAS_JUSTIFICACION.md para detalles)
-  type: "unet"
+---
+## TASK 1: CLASSIFICATION (Benign/Malignant/Negative)
+classification:
+  # Model architecture
+  model: "densenet121"                       # Options: densenet121, resnet50, efficientnet
+  num_classes: 3                             # Benign(0), Malignant(1), Negative(2)
+  pretrained: true                           # Use ImageNet pre-training
+  input_size: [1, 512, 512]                  # (channels, height, width)
   
-  # Parámetros específicos por modelo
-  unet:
-    encoder_depth: 4          # Profundidad del encoder
-    decoder_channels: [256, 128, 64, 32]
-    encoder_channels: [3, 64, 128, 256, 512]
-    in_channels: 1            # Escala de grises
-    out_channels: 1           # Salida binaria (Masks)
-    dropout: 0.2
-  
-  segnet:
-    encoder: "vgg16"          # "vgg16" para encoder
-    in_channels: 1            # Escala de grises
-    out_channels: 1           # Salida binaria (Masks)
-    dropout: 0.2
-    # SegNet es mejor que FCN en precisión de bordes (ver literatura)
-  
-  deeplabv3:
-    backbone: "resnet50"      # "resnet50" o "resnet101"
-    in_channels: 1
-    out_channels: 1
-    atrous_rates: [6, 12, 18]
-    aspp_channels: 256
-
-# ============================================================================
-# TRAINING CONFIGURATION
-# ============================================================================
-training:
-  # Dispositivo
-  device: "cuda"              # "cuda" o "cpu"
-  
-  # Hiperparámetros
+  # Training parameters
+  batch_size: 32
   epochs: 200
-  batch_size: 16              # Reducido para segmentación (GPU memory)
-  learning_rate: 0.001
-  weight_decay: 1e-4
-  
-  # Optimizer
-  optimizer: "adam"           # "adam", "sgd", "adamw"
-  
-  # Learning rate scheduler
-  scheduler: "cosine"         # "cosine", "exponential", "step"
+  learning_rate: 0.0001
+  optimizer: "adam"                          # adam, sgd
+  scheduler: "exponential"                   # exponential, step, cosine
   scheduler_params:
-    T_max: 200                # Para cosine
-    
+    gamma: 0.95                              # multiplicative factor
+    step_size: 10                            # decay every N epochs
+  
   # Loss function
-  loss_fn: "dice"             # "dice", "bce", "focal", "combined"
+  loss: "cross_entropy_weighted"             # weighted for class imbalance
+  class_weights: [0.51, 0.81, 0.65]        # Inverse class frequency
   
-  # Loss weights (si hay múltiples outputs)
-  loss_weights:
-    masks: 1.0
-    pla: 0.5                  # Si también predices PLA
-  
-  # Early stopping
+  # Regularization
+  dropout: 0.3
+  weight_decay: 0.0001                       # L2 regularization
   early_stopping:
     enabled: true
-    patience: 30              # Épocas sin mejora antes de parar
-    min_delta: 0.001          # Mejora mínima para resetear patience
+    patience: 20                             # epochs without improvement
+    metric: "val_auc_roc"                   # Monitor AUC-ROC
+    mode: "max"
+  
+  # Metrics to monitor
+  metrics: ["accuracy", "precision", "recall", "f1", "auc_roc"]
   
   # Checkpoint saving
-  checkpoint:
-    save_best: true
-    save_interval: 10         # Guardar cada 10 épocas
-    keep_best_k: 3            # Guardar top 3 modelos
+  save_best: true
+  save_dir: "./models/classification/"
+  checkpoint_interval: 10                    # Save every N epochs
 
-# ============================================================================
-# VALIDATION & METRICS
-# ============================================================================
-validation:
-  # Frecuencia de validación
-  validate_every: 1           # Cada N épocas
+---
+## TASK 2: DETECTION (Localize anomalies with bounding boxes)
+detection:
+  # Model architecture
+  model: "mask_rcnn"                         # Mask R-CNN ResNet50-FPN
+  backbone: "resnet50"
+  num_classes: 2                             # Anomaly (1) + Background (0)
+  pretrained: true                           # COCO pre-training
+  input_size: [1, 512, 512]
   
-  # Métricas a calcular
-  metrics:
-    - "iou"                   # Intersection over Union
-    - "dice"                  # Dice coefficient
-    - "accuracy"              # Accuracy
-    - "precision"             # Precision
-    - "recall"                # Recall
-    - "f1"                    # F1 score
+  # Training parameters
+  batch_size: 8                              # Smaller for memory efficiency
+  epochs: 150
+  learning_rate: 0.0001
+  optimizer: "sgd"
+  scheduler: "step"
+  scheduler_params:
+    step_size: 50
+    gamma: 0.1
   
-  # Threshold para binarización (si es necesario)
-  threshold: 0.5
-
-# ============================================================================
-# EVALUATION CONFIGURATION
-# ============================================================================
-evaluation:
-  # Generar predicciones en test set
-  generate_predictions: true
+  # Loss function (integrated in Mask R-CNN)
+  loss: "multi_task"                         # bbox regression + classification
   
-  # Visualizaciones
-  save_visualizations: true
-  num_samples: 10             # Número de samples a visualizar
-  
-  # Comparación con ground truth
-  compute_metrics: true
-  
-  # Salvar resultados
-  save_results: true
-  results_dir: "./results"
-
-# ============================================================================
-# LOGGING & MONITORING
-# ============================================================================
-logging:
-  # Level: DEBUG, INFO, WARNING, ERROR, CRITICAL
-  level: "INFO"
-  
-  # Tensorboard
-  tensorboard:
+  # Regularization
+  weight_decay: 0.0005
+  early_stopping:
     enabled: true
-    log_dir: "./runs"
+    patience: 20
+    metric: "val_map"
+    mode: "max"
   
-  # Wandb (Weights & Biases)
-  wandb:
-    enabled: false            # Activar si tienes cuenta
-    project: "breast-cancer-segmentation"
-    entity: "username"        # Tu usuario de wandb
+  # Metrics
+  metrics: ["precision", "recall", "map", "iou"]
   
-  # Frecuencia de logging
-  log_interval: 10            # Cada N batches
+  # Checkpoint saving
+  save_best: true
+  save_dir: "./models/detection/"
+  checkpoint_interval: 10
+  
+  # Inference parameters
+  score_threshold: 0.5                       # Min confidence for detections
+  nms_threshold: 0.3                         # Non-Maximum Suppression
 
-# ============================================================================
-# PATHS
-# ============================================================================
-paths:
-  # Directorio base del proyecto
-  project_root: "./"
+---
+## TASK 3: SEGMENTATION (Delineate lesion boundaries)
+segmentation:
+  # Models to train (can train both for comparison)
+  models: ["unet", "deeplabv3"]              # Try both architectures
   
-  # Subdirectorios
-  data_dir: "./data"
-  models_dir: "./models"
-  results_dir: "./results"
-  logs_dir: "./logs"
+  ### U-Net Configuration
+  unet:
+    model_name: "unet"
+    input_size: [1, 512, 512]
+    output_size: [1, 512, 512]
+    encoder_channels: [64, 128, 256, 512]
+    decoder_channels: [512, 256, 128, 64]
+    pretrained: false                        # No pre-training for U-Net
   
-  # Archivos de checkpoint
-  best_model: "./models/best_model.pth"
-  last_model: "./models/last_model.pth"
+  ### DeepLabV3+ Configuration
+  deeplabv3:
+    model_name: "deeplabv3+"
+    backbone: "resnet50"
+    output_stride: 16                        # Feature map resolution
+    pretrained_backbone: true                # ImageNet for backbone
+    input_size: [1, 512, 512]
+    output_size: [1, 512, 512]
+  
+  # Training parameters (common)
+  batch_size: 16
+  epochs: 200
+  learning_rate: 0.001
+  optimizer: "adam"
+  scheduler: "cosine"                        # cosine annealing
+  scheduler_params:
+    t_max: 200                               # Full training duration
+  
+  # Loss function
+  loss: "combined"                           # 0.5*Dice + 0.5*BCE
+  loss_params:
+    lambda_dice: 0.5
+    lambda_bce: 0.5
+  
+  # Regularization
+  dropout: 0.2
+  weight_decay: 0.0001
+  early_stopping:
+    enabled: true
+    patience: 30                             # Longer patience for seg
+    metric: "val_dice"
+    mode: "max"
+  
+  # Metrics to monitor
+  metrics: ["dice", "iou", "accuracy", "sensitivity", "specificity"]
+  
+  # Checkpoint saving
+  save_best: true
+  save_dir: "./models/segmentation/"
+  checkpoint_interval: 10
+  
+  # Post-processing
+  post_processing:
+    threshold: 0.5                           # Probability threshold for binary
+    morphological_closing: true
+    closing_kernel_size: 5
+    remove_small_objects: true
+    min_object_size: 50                      # pixels
 
-# ============================================================================
-# REPRODUCIBILITY
-# ============================================================================
-reproducibility:
+---
+## HARDWARE & TRAINING
+training:
+  device: "cuda"                             # cuda or cpu
+  num_workers: 4                             # DataLoader workers
+  pin_memory: true
+  mixed_precision: false                     # AMP (Automatic Mixed Precision)
+  
+  # Reproducibility
   seed: 42
-  deterministic: true
-  benchmark: false            # Desactivar para resultados deterministas
+  deterministic: true                        # Deterministic algorithms
+  
+  # Logging
+  log_dir: "./logs/"
+  tensorboard: true
+  save_interval: 100                         # Log every N batches
+
+---
+## EVALUATION
+evaluation:
+  # Metrics thresholds
+  classification:
+    target_auc_roc: 0.95                     # Target performance
+    target_accuracy: 0.90
+  
+  detection:
+    target_map: 0.90                         # @ IoU=0.5
+    target_iou: 0.85
+  
+  segmentation:
+    target_dice: 0.85
+    target_iou: 0.75
+  
+  # Cross-validation
+  kfold:
+    enabled: true
+    n_splits: 5
+    stratified: true                         # Stratified by class
+
+---
+## INFERENCE
+inference:
+  batch_size: 32
+  save_predictions: true
+  output_format: "json"                      # json or pickle
+  visualization:
+    save_visualizations: true
+    format: "png"
+    dpi: 150
+
+---
+## PATHS (relative to Bloque2_CNN/)
+paths:
+  data_root: "../"
+  output_root: "./"
+  models_dir: "./models/"
+  logs_dir: "./logs/"
+  results_dir: "./results/"
+  notebooks_dir: "./notebooks/"
+
+---
+## NOTES
+notes: |
+  - Class imbalance handled by weighted loss (Classification)
+  - Detection uses metadata.xlsx coordinates to validate
+  - Segmentation trained only on 269 annotated images
+  - Pipeline is sequential: Classification → Detection → Segmentation
+  - All models use early stopping to prevent overfitting
+  - Learning rates calibrated for medical imaging (lower than typical)

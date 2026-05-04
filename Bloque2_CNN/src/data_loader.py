@@ -1,260 +1,362 @@
 """
-Data loading module for DMID_PNG segmentation dataset.
-
-Carga imágenes TIFF, máscaras (Masks) y anotaciones pixel-level (PLA)
-desde la carpeta DMID_PNG.
+Data Loader Module for Bloque2_CNN
+Handles multi-task dataset loading: Classification + Detection + Segmentation
 """
 
 import os
-import cv2
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from torch.utils.data import Dataset, DataLoader
-import torchvision.transforms as transforms
+from typing import Dict, Tuple, Optional, Union
+import torch
+from torch.utils.data import Dataset
+from torchvision import transforms
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 from PIL import Image
+import cv2
 
 
-class DMIDSegmentationDataset(Dataset):
-    """
-    Dataset para segmentación de lesiones mamarias.
+class MetadataLoader:
+    """Loads and parses metadata.xlsx for classification labels and bounding boxes"""
     
-    Carga TIFF, Masks, y PLA manteniendo alineación por nombre de archivo.
-    """
-    
-    def __init__(
-        self,
-        tiff_dir: str,
-        masks_dir: str,
-        pla_dir: str,
-        transform=None,
-        target_transform=None,
-        include_pla=True,
-        mode='masks'  # 'masks' para salida binaria, 'pla' para multi-clase
-    ):
+    def __init__(self, metadata_path: str):
         """
+        Initialize MetadataLoader
+        
         Args:
-            tiff_dir: Directorio con imágenes TIFF
-            masks_dir: Directorio con máscaras binarias
-            pla_dir: Directorio con anotaciones pixel-level
-            transform: Transformaciones para imágenes
-            target_transform: Transformaciones para targets (máscaras)
-            include_pla: Si incluir PLA (requiere cálculo adicional)
-            mode: 'masks' para salida binaria, 'pla' para multi-clase
+            metadata_path: Path to Metadata.xlsx
+        """
+        self.metadata_path = metadata_path
+        self.df = pd.read_excel(metadata_path)
+        
+        # Map class labels to indices
+        self.class_map = {
+            'B': 0,           # Benign
+            'M': 1,           # Malignant
+            'N': 2,           # No Defined
+            None: 2,          # Treat None as Negative (class 2)
+            np.nan: 2         # NaN is Negative
+        }
+        
+        self.class_names = ['Benign', 'Malignant', 'Negative']
+        
+    def get_image_metadata(self, image_id: str) -> Dict:
+        """
+        Get metadata for specific image
+        
+        Args:
+            image_id: Image reference (e.g., 'IMG001')
+        
+        Returns:
+            Dict with keys:
+                - classification_label: int (0/1/2)
+                - has_anomaly: bool
+                - bbox: tuple (x, y, radius) or None
+                - anomaly_type: str
+                - tissue_type: str
+                - view: str
+        """
+        rows = self.df[self.df['Image_Reference'] == image_id]
+        
+        if len(rows) == 0:
+            return {
+                'classification_label': 2,  # Default to Negative
+                'has_anomaly': False,
+                'bbox': None,
+                'anomaly_type': 'NORM',
+                'tissue_type': 'G',
+                'view': 'UNKNOWN'
+            }
+        
+        row = rows.iloc[0]
+        
+        # Get classification label
+        class_label = row['Class_Abnormality']
+        classification_label = self.class_map.get(class_label, 2)
+        
+        # Check if has anomaly
+        has_anomaly = pd.notna(class_label) and class_label != 'N'
+        
+        # Extract bounding box coordinates
+        bbox = None
+        if pd.notna(row['X_Coordinate']) and pd.notna(row['Y_Coordinate']) and pd.notna(row['Radius_pixels']):
+            bbox = (
+                float(row['X_Coordinate']),
+                float(row['Y_Coordinate']),
+                float(row['Radius_pixels'])
+            )
+        
+        return {
+            'classification_label': classification_label,
+            'has_anomaly': has_anomaly,
+            'bbox': bbox,
+            'anomaly_type': str(row['Abnormality_Type']),
+            'tissue_type': str(row['Background_Tissue']),
+            'view': str(row['Mammogram_View'])
+        }
+    
+    def get_class_weights(self) -> torch.Tensor:
+        """Calculate class weights for handling imbalance"""
+        counts = self.df['Class_Abnormality'].value_counts()
+        total = len(self.df)
+        
+        # Inverse frequency weighting
+        weights = {}
+        for cls_name, cls_idx in self.class_map.items():
+            if pd.isna(cls_name):
+                count = len(self.df[self.df['Class_Abnormality'].isna()])
+            else:
+                count = len(self.df[self.df['Class_Abnormality'] == cls_name])
+            weights[cls_idx] = total / (3 * max(count, 1))
+        
+        return torch.tensor([weights.get(i, 1.0) for i in range(3)], dtype=torch.float32)
+
+
+class DMIDMultiTaskDataset(Dataset):
+    """
+    Multi-task dataset for Classification + Detection + Segmentation
+    Loads TIFF images, masks, PLA, and metadata
+    """
+    
+    def __init__(self,
+                 tiff_dir: str,
+                 masks_dir: str,
+                 pla_dir: str,
+                 metadata_loader: MetadataLoader,
+                 split: str = 'train',
+                 image_ids: Optional[list] = None,
+                 augmentation: bool = True):
+        """
+        Initialize dataset
+        
+        Args:
+            tiff_dir: Directory containing TIFF images
+            masks_dir: Directory containing mask .npy files
+            pla_dir: Directory containing PLA .npy files
+            metadata_loader: MetadataLoader instance
+            split: 'train', 'val', or 'test'
+            image_ids: List of specific image IDs to use
+            augmentation: Whether to apply augmentation
         """
         self.tiff_dir = Path(tiff_dir)
         self.masks_dir = Path(masks_dir)
         self.pla_dir = Path(pla_dir)
-        self.transform = transform
-        self.target_transform = target_transform
-        self.include_pla = include_pla
-        self.mode = mode
+        self.metadata_loader = metadata_loader
+        self.split = split
+        self.augmentation = augmentation
         
-        # Buscar imágenes TIFF
-        self.tiff_files = sorted(self.tiff_dir.glob('*.png'))
+        # Find all TIFF files
+        self.tiff_files = sorted(list(self.tiff_dir.glob('*.tif')))
         
-        # Buscar máscaras (subconjunto de TIFF)
-        self.mask_files = sorted(self.masks_dir.glob('*.png'))
+        if image_ids is not None:
+            # Filter to specific image IDs
+            self.tiff_files = [f for f in self.tiff_files if f.stem in image_ids]
         
-        # Crear mapeo de filename -> mask
-        self.mask_dict = {f.name: f for f in self.mask_files}
-        
-        # Si está disponible, mapear PLA también
-        if include_pla and pla_dir and Path(pla_dir).exists():
-            self.pla_files = sorted(Path(pla_dir).glob('*.png'))
-            self.pla_dict = {f.name: f for f in self.pla_files}
-        else:
-            self.pla_dict = {}
-        
-        print(f"✓ Dataset inicializado")
-        print(f"  - TIFF: {len(self.tiff_files)} imágenes")
-        print(f"  - Masks: {len(self.mask_files)} máscaras")
-        print(f"  - PLA: {len(self.pla_dict)} anotaciones pixel-level")
+        # Setup augmentation pipeline
+        self._setup_augmentation()
     
-    def __len__(self):
+    def _setup_augmentation(self):
+        """Setup augmentation pipeline"""
+        if self.augmentation and self.split == 'train':
+            self.transform = A.Compose([
+                A.Rotate(limit=15, p=0.5),
+                A.Zoom(scale=(0.8, 1.2), p=0.5),
+                A.GaussianBlur(blur_limit=3, p=0.3),
+                A.GaussNoise(p=0.3),
+                A.RandomBrightnessContrast(p=0.3),
+                A.Normalize(mean=0.5, std=0.5),
+                ToTensorV2()
+            ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['class_labels']))
+        else:
+            self.transform = A.Compose([
+                A.Normalize(mean=0.5, std=0.5),
+                ToTensorV2()
+            ])
+    
+    def __len__(self) -> int:
+        """Return number of images"""
         return len(self.tiff_files)
     
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Dict:
         """
-        Retorna: (imagen, máscara, [pla])
+        Load single sample
+        
+        Returns:
+            Dict with:
+                - image_id: str
+                - image: Tensor (1, 512, 512)
+                - classification_label: int (0/1/2)
+                - has_anomaly: bool
+                - bbox: Tensor (4,) normalized or None
+                - mask: Tensor (512, 512) or None
+                - pla: Tensor (512, 512) or None
+                - tissue_type: str
+                - view: str
         """
-        # Cargar imagen TIFF
+        # Load image
         tiff_path = self.tiff_files[idx]
+        image_id = tiff_path.stem
+        
+        # Read TIFF
         image = cv2.imread(str(tiff_path), cv2.IMREAD_GRAYSCALE)
-        
         if image is None:
-            raise ValueError(f"No se pudo leer: {tiff_path}")
+            image = np.zeros((512, 512), dtype=np.uint8)
         
-        # Normalizar imagen a [0, 1]
+        # Normalize to [0, 1]
         image = image.astype(np.float32) / 255.0
         
-        # Aplicar transformaciones a imagen
-        if self.transform:
-            image = self.transform(image)
+        # Get metadata
+        metadata = self.metadata_loader.get_image_metadata(image_id)
         
-        # Cargar máscara correspondiente (si existe)
-        filename = tiff_path.name
-        if filename in self.mask_dict:
-            mask_path = self.mask_dict[filename]
-            mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
+        # Load mask if exists
+        mask = None
+        mask_path = self.masks_dir / f"{image_id}.npy"
+        if mask_path.exists():
+            mask = np.load(mask_path).astype(np.float32)
+        
+        # Load PLA if exists
+        pla = None
+        pla_path = self.pla_dir / f"{image_id}.npy"
+        if pla_path.exists():
+            pla = np.load(pla_path).astype(np.float32)
+        
+        # Convert bbox from metadata format to normalized coordinates
+        bbox_normalized = None
+        if metadata['bbox'] is not None:
+            x, y, radius = metadata['bbox']
+            # Normalize to [0, 1]
+            x_norm = x / 512.0
+            y_norm = y / 512.0
+            r_norm = radius / 512.0
             
-            if mask is None:
-                # Si no se puede leer, crear máscara vacía
-                mask = np.zeros_like(image, dtype=np.float32)
-            else:
-                # Binarizar máscara: 0 o 1
-                mask = (mask > 127).astype(np.float32)
+            # Convert to [x_min, y_min, x_max, y_max] format
+            x_min = max(0, x_norm - r_norm)
+            y_min = max(0, y_norm - r_norm)
+            x_max = min(1, x_norm + r_norm)
+            y_max = min(1, y_norm + r_norm)
+            
+            bbox_normalized = torch.tensor([x_min, y_min, x_max, y_max], dtype=torch.float32)
+        
+        # Apply augmentation
+        if self.augmentation and self.split == 'train':
+            # Augmentation with bbox support
+            bboxes = [bbox_normalized.tolist()] if bbox_normalized is not None else []
+            augmented = self.transform(
+                image=image,
+                mask=mask if mask is not None else np.zeros_like(image),
+                bboxes=bboxes,
+                class_labels=[0] if bboxes else []
+            )
+            image = augmented['image']
+            mask = augmented.get('mask', mask)
+            
+            if augmented.get('bboxes'):
+                bbox_normalized = torch.tensor(augmented['bboxes'][0], dtype=torch.float32)
         else:
-            # Si no hay máscara, crear una vacía
-            mask = np.zeros(image.shape, dtype=np.float32)
+            # Standard normalization
+            image = torch.from_numpy(image[np.newaxis, ...]).float()  # Add channel
+            if mask is not None:
+                mask = torch.from_numpy(mask).float()
+            if pla is not None:
+                pla = torch.from_numpy(pla).float()
         
-        # Aplicar transformaciones a máscara
-        if self.target_transform:
-            mask = self.target_transform(mask)
+        # Ensure image is 3D
+        if image.dim() == 2:
+            image = image.unsqueeze(0)
         
-        # Cargar PLA (anotación pixel-level) si está disponible
-        if filename in self.pla_dict and self.include_pla:
-            pla_path = self.pla_dict[filename]
-            pla = cv2.imread(str(pla_path), cv2.IMREAD_GRAYSCALE)
-            
-            if pla is None:
-                pla = np.zeros_like(image, dtype=np.float32)
-            else:
-                pla = pla.astype(np.float32) / 255.0
-            
-            # Retornar (imagen, máscara, pla)
-            return {
-                'image': image,
-                'mask': mask,
-                'pla': pla,
-                'filename': filename
-            }
-        else:
-            # Retornar solo (imagen, máscara)
-            return {
-                'image': image,
-                'mask': mask,
-                'filename': filename
-            }
+        result = {
+            'image_id': image_id,
+            'image': image,
+            'classification_label': metadata['classification_label'],
+            'has_anomaly': metadata['has_anomaly'],
+            'bbox': bbox_normalized,
+            'mask': mask,
+            'pla': pla,
+            'tissue_type': metadata['tissue_type'],
+            'view': metadata['view']
+        }
+        
+        return result
 
 
-class SegmentationDataModule:
+def create_data_loaders(config: Dict,
+                       metadata_loader: MetadataLoader,
+                       batch_size: Optional[int] = None) -> Tuple[torch.utils.data.DataLoader, 
+                                                                   torch.utils.data.DataLoader,
+                                                                   torch.utils.data.DataLoader]:
     """
-    Módulo para manejar datos de segmentación.
-    Divide en train/val/test y crea DataLoaders.
+    Create train/val/test data loaders
+    
+    Args:
+        config: Configuration dict
+        metadata_loader: MetadataLoader instance
+        batch_size: Override config batch size
+    
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader)
     """
+    # Get paths from config
+    tiff_dir = config['data']['tiff_dir']
+    masks_dir = config['data']['masks_dir']
+    pla_dir = config['data']['pla_dir']
     
-    def __init__(
-        self,
-        tiff_dir: str,
-        masks_dir: str,
-        pla_dir: str,
-        batch_size: int = 16,
-        train_split: float = 0.6,
-        val_split: float = 0.2,
-        test_split: float = 0.2,
-        num_workers: int = 4,
-        seed: int = 42
-    ):
-        """
-        Args:
-            batch_size: Tamaño de batch
-            train_split: Fracción para entrenamiento
-            val_split: Fracción para validación
-            test_split: Fracción para test
-            num_workers: Número de workers para DataLoader
-            seed: Random seed para reproducibilidad
-        """
-        np.random.seed(seed)
-        
-        self.tiff_dir = tiff_dir
-        self.masks_dir = masks_dir
-        self.pla_dir = pla_dir
-        self.batch_size = batch_size
-        self.num_workers = num_workers
-        
-        # Obtener lista de imágenes anotadas (que tienen máscara)
-        mask_files = set(f.name for f in Path(masks_dir).glob('*.png'))
-        tiff_files = [f.name for f in Path(tiff_dir).glob('*.png') 
-                      if f.name in mask_files]
-        
-        # Dividir índices
-        n = len(tiff_files)
-        train_size = int(n * train_split)
-        val_size = int(n * val_split)
-        
-        indices = np.arange(n)
-        np.random.shuffle(indices)
-        
-        train_idx = indices[:train_size]
-        val_idx = indices[train_size:train_size+val_size]
-        test_idx = indices[train_size+val_size:]
-        
-        self.train_files = [tiff_files[i] for i in train_idx]
-        self.val_files = [tiff_files[i] for i in val_idx]
-        self.test_files = [tiff_files[i] for i in test_idx]
-        
-        print(f"✓ Data split:")
-        print(f"  - Train: {len(self.train_files)} ({100*train_split:.1f}%)")
-        print(f"  - Val: {len(self.val_files)} ({100*val_split:.1f}%)")
-        print(f"  - Test: {len(self.test_files)} ({100*test_split:.1f}%)")
+    batch_size = batch_size or config['classification']['batch_size']
     
-    def get_train_loader(self):
-        """Retorna DataLoader de entrenamiento"""
-        dataset = DMIDSegmentationDataset(
-            self.tiff_dir, self.masks_dir, self.pla_dir,
-            include_pla=True
-        )
-        loader = DataLoader(
-            dataset, batch_size=self.batch_size,
-            shuffle=True, num_workers=self.num_workers,
-            pin_memory=True
-        )
-        return loader
+    # Create full dataset first to get all image IDs
+    full_dataset = DMIDMultiTaskDataset(
+        tiff_dir, masks_dir, pla_dir, metadata_loader,
+        split='all', augmentation=False
+    )
     
-    def get_val_loader(self):
-        """Retorna DataLoader de validación"""
-        dataset = DMIDSegmentationDataset(
-            self.tiff_dir, self.masks_dir, self.pla_dir,
-            include_pla=True
-        )
-        loader = DataLoader(
-            dataset, batch_size=self.batch_size,
-            shuffle=False, num_workers=self.num_workers,
-            pin_memory=True
-        )
-        return loader
+    # Get image IDs
+    image_ids = [dataset_item['image_id'] for dataset_item in full_dataset]
     
-    def get_test_loader(self):
-        """Retorna DataLoader de test"""
-        dataset = DMIDSegmentationDataset(
-            self.tiff_dir, self.masks_dir, self.pla_dir,
-            include_pla=True
-        )
-        loader = DataLoader(
-            dataset, batch_size=self.batch_size,
-            shuffle=False, num_workers=self.num_workers,
-            pin_memory=True
-        )
-        return loader
-
-
-# Test de uso
-if __name__ == "__main__":
-    # Rutas de ejemplo
-    tiff_dir = "../../data/raw/DMID_PNG/512x512/TIFF"
-    masks_dir = "../../data/raw/DMID_PNG/512x512/Masks"
-    pla_dir = "../../data/raw/DMID_PNG/512x512/PLA_PNG"
+    # Random split
+    np.random.seed(config['training']['seed'])
+    indices = np.random.permutation(len(image_ids))
     
-    # Crear dataset
-    dataset = DMIDSegmentationDataset(tiff_dir, masks_dir, pla_dir)
-    print(f"Dataset creado: {len(dataset)} samples")
+    train_idx = indices[:int(0.6 * len(indices))]
+    val_idx = indices[int(0.6 * len(indices)):int(0.8 * len(indices))]
+    test_idx = indices[int(0.8 * len(indices)):]
     
-    # Cargar un sample
-    sample = dataset[0]
-    print(f"\nSample 0:")
-    print(f"  - Image shape: {sample['image'].shape}")
-    print(f"  - Mask shape: {sample['mask'].shape}")
-    if 'pla' in sample:
-        print(f"  - PLA shape: {sample['pla'].shape}")
-    print(f"  - Filename: {sample['filename']}")
+    train_ids = [image_ids[i] for i in train_idx]
+    val_ids = [image_ids[i] for i in val_idx]
+    test_ids = [image_ids[i] for i in test_idx]
+    
+    # Create datasets
+    train_dataset = DMIDMultiTaskDataset(
+        tiff_dir, masks_dir, pla_dir, metadata_loader,
+        split='train', image_ids=train_ids, augmentation=True
+    )
+    
+    val_dataset = DMIDMultiTaskDataset(
+        tiff_dir, masks_dir, pla_dir, metadata_loader,
+        split='val', image_ids=val_ids, augmentation=False
+    )
+    
+    test_dataset = DMIDMultiTaskDataset(
+        tiff_dir, masks_dir, pla_dir, metadata_loader,
+        split='test', image_ids=test_ids, augmentation=False
+    )
+    
+    # Create data loaders
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=config['training']['num_workers'],
+        pin_memory=config['training']['pin_memory']
+    )
+    
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=config['training']['num_workers'],
+        pin_memory=config['training']['pin_memory']
+    )
+    
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=config['training']['num_workers'],
+        pin_memory=config['training']['pin_memory']
+    )
+    
+    return train_loader, val_loader, test_loader

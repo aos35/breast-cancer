@@ -1,418 +1,482 @@
 """
-Módelo architectures para segmentación de lesiones mamarias.
-
-Implementa: U-Net, FCN, DeepLab V3
+Model Architectures for Bloque2_CNN
+Classification (DenseNet121) + Detection (Mask R-CNN) + Segmentation (U-Net, DeepLabV3+)
 """
 
 import torch
 import torch.nn as nn
+import torchvision
+from torchvision.models.detection import maskrcnn_resnet50_fpn
 import torch.nn.functional as F
-from torchvision import models
 
 
 # ============================================================================
-# U-NET ARCHITECTURE
+# TASK 1: CLASSIFICATION - DenseNet121
 # ============================================================================
 
-class DoubleConv(nn.Module):
-    """Bloque: Conv2d -> BatchNorm -> ReLU -> Conv2d -> BatchNorm -> ReLU"""
+class DenseNet121Classifier(nn.Module):
+    """
+    DenseNet121 for 3-class classification: Benign / Malignant / Negative
+    """
     
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.double_conv = nn.Sequential(
+    def __init__(self, num_classes: int = 3, pretrained: bool = True):
+        """
+        Initialize DenseNet121 classifier
+        
+        Args:
+            num_classes: Number of classes (3 for B/M/N)
+            pretrained: Use ImageNet pre-training
+        """
+        super(DenseNet121Classifier, self).__init__()
+        
+        # Load pre-trained DenseNet121
+        self.backbone = torchvision.models.densenet121(pretrained=pretrained)
+        
+        # Adapt first layer for 1-channel input (grayscale mammography)
+        # Original: 3 channels → 64 channels
+        original_conv = self.backbone.features[0]
+        self.backbone.features[0] = nn.Conv2d(
+            1, 64, kernel_size=7, stride=2, padding=3, bias=False
+        )
+        
+        # Initialize new conv layer with weights from first 3 channels averaged
+        if pretrained:
+            with torch.no_grad():
+                self.backbone.features[0].weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
+        
+        # Get final features dimension (DenseNet121 outputs 1024 channels)
+        num_features = self.backbone.classifier.in_features
+        
+        # Classification head
+        self.classifier = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(num_features, 512),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(512),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.ReLU(inplace=True),
+            nn.BatchNorm1d(256),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass
+        
+        Args:
+            x: Input tensor (B, 1, 512, 512)
+        
+        Returns:
+            logits: (B, 3) classification logits
+        """
+        features = self.backbone.features(x)
+        logits = self.classifier(features)
+        return logits
+
+
+# ============================================================================
+# TASK 2: DETECTION - Mask R-CNN
+# ============================================================================
+
+def get_mask_rcnn(num_classes: int = 2, pretrained: bool = True) -> nn.Module:
+    """
+    Create Mask R-CNN for detection
+    
+    Args:
+        num_classes: Number of classes (2: anomaly + background)
+        pretrained: Use COCO pre-training
+    
+    Returns:
+        Mask R-CNN model
+    """
+    model = maskrcnn_resnet50_fpn(pretrained=pretrained, num_classes=num_classes)
+    
+    # Adapt for 1-channel input
+    original_conv = model.backbone.body.conv1
+    model.backbone.body.conv1 = nn.Conv2d(
+        1, 64, kernel_size=7, stride=2, padding=3, bias=False
+    )
+    
+    # Initialize with averaged weights if pretrained
+    if pretrained:
+        with torch.no_grad():
+            model.backbone.body.conv1.weight.data = original_conv.weight.data.mean(dim=1, keepdim=True)
+    
+    return model
+
+
+# ============================================================================
+# TASK 3: SEGMENTATION - U-Net
+# ============================================================================
+
+class ConvBlock(nn.Module):
+    """Convolutional block: Conv + ReLU + BatchNorm"""
+    
+    def __init__(self, in_channels: int, out_channels: int):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True)
         )
     
-    def forward(self, x):
-        return self.double_conv(x)
-
-
-class Down(nn.Module):
-    """Downsampling: MaxPool + DoubleConv"""
-    
-    def __init__(self, in_channels, out_channels):
-        super().__init__()
-        self.maxpool_conv = nn.Sequential(
-            nn.MaxPool2d(2),
-            DoubleConv(in_channels, out_channels)
-        )
-    
-    def forward(self, x):
-        return self.maxpool_conv(x)
-
-
-class Up(nn.Module):
-    """Upsampling: Upsample + Concatenate + DoubleConv"""
-    
-    def __init__(self, in_channels, out_channels, bilinear=True):
-        super().__init__()
-        
-        if bilinear:
-            self.up = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)
-            self.conv = DoubleConv(in_channels, out_channels)
-        else:
-            self.up = nn.ConvTranspose2d(in_channels // 2, in_channels // 2, kernel_size=2, stride=2)
-            self.conv = DoubleConv(in_channels, out_channels)
-    
-    def forward(self, x1, x2):
-        x1 = self.up(x1)
-        
-        # Ajustar tamaño si es necesario
-        diffY = x2.size()[2] - x1.size()[2]
-        diffX = x2.size()[3] - x1.size()[3]
-        x1 = F.pad(x1, [diffX // 2, diffX - diffX // 2,
-                        diffY // 2, diffY - diffY // 2])
-        
-        # Concatenar skip connection
-        x = torch.cat([x2, x1], dim=1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(x)
+
+
+class UpConvBlock(nn.Module):
+    """Upsampling block: Transposed Conv + ReLU + BatchNorm"""
+    
+    def __init__(self, in_channels: int, out_channels: int):
+        super(UpConvBlock, self).__init__()
+        self.up = nn.Sequential(
+            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.up(x)
 
 
 class UNet(nn.Module):
     """
-    U-Net para segmentación médica.
-    
-    Arquitectura:
-    - Encoder con 4 niveles (downsampling)
-    - Bottleneck
-    - Decoder con 4 niveles (upsampling)
-    - Skip connections
+    U-Net for medical image segmentation
+    Architecture:
+    - Encoder: 4 levels of conv blocks with max pooling
+    - Bottleneck: 1024 channels
+    - Decoder: 4 levels of transpose conv with skip connections
     """
     
-    def __init__(self, in_channels, out_channels, bilinear=True):
-        super().__init__()
+    def __init__(self, in_channels: int = 1, out_channels: int = 1):
+        """
+        Initialize U-Net
         
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.bilinear = bilinear
+        Args:
+            in_channels: Input channels (1 for grayscale)
+            out_channels: Output channels (1 for binary segmentation)
+        """
+        super(UNet, self).__init__()
         
         # Encoder
-        self.inc = DoubleConv(in_channels, 64)
-        self.down1 = Down(64, 128)
-        self.down2 = Down(128, 256)
-        self.down3 = Down(256, 512)
-        self.down4 = Down(512, 1024)
+        self.enc1 = ConvBlock(in_channels, 64)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Decoder
-        factor = 2 if bilinear else 1
-        self.up1 = Up(1024, 512 // factor, bilinear)
-        self.up2 = Up(512, 256 // factor, bilinear)
-        self.up3 = Up(256, 128 // factor, bilinear)
-        self.up4 = Up(128, 64, bilinear)
+        self.enc2 = ConvBlock(64, 128)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
         
-        # Head
-        self.outc = nn.Conv2d(64, out_channels, kernel_size=1)
+        self.enc3 = ConvBlock(128, 256)
+        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        self.enc4 = ConvBlock(256, 512)
+        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
+        
+        # Bottleneck
+        self.bottleneck = ConvBlock(512, 1024)
+        
+        # Decoder with skip connections
+        self.upconv4 = UpConvBlock(1024, 512)
+        self.dec4 = ConvBlock(512 + 512, 512)  # 512 from decoder + 512 from skip
+        
+        self.upconv3 = UpConvBlock(512, 256)
+        self.dec3 = ConvBlock(256 + 256, 256)
+        
+        self.upconv2 = UpConvBlock(256, 128)
+        self.dec2 = ConvBlock(128 + 128, 128)
+        
+        self.upconv1 = UpConvBlock(128, 64)
+        self.dec1 = ConvBlock(64 + 64, 64)
+        
+        # Final output layer
+        self.final = nn.Sequential(
+            nn.Conv2d(64, out_channels, kernel_size=1),
+            nn.Sigmoid()  # Binary output [0, 1]
+        )
     
-    def forward(self, x):
-        # Encoder
-        x1 = self.inc(x)
-        x2 = self.down1(x1)
-        x3 = self.down2(x2)
-        x4 = self.down3(x3)
-        x5 = self.down4(x4)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass
         
-        # Decoder
-        x = self.up1(x5, x4)
-        x = self.up2(x, x3)
-        x = self.up3(x, x2)
-        x = self.up4(x, x1)
+        Args:
+            x: Input tensor (B, 1, 512, 512)
         
-        # Head
-        x = self.outc(x)
+        Returns:
+            output: (B, 1, 512, 512) segmentation mask probabilities
+        """
+        # Encoder with skip connections
+        enc1 = self.enc1(x)
+        x = self.pool1(enc1)
+        
+        enc2 = self.enc2(x)
+        x = self.pool2(enc2)
+        
+        enc3 = self.enc3(x)
+        x = self.pool3(enc3)
+        
+        enc4 = self.enc4(x)
+        x = self.pool4(enc4)
+        
+        # Bottleneck
+        x = self.bottleneck(x)
+        
+        # Decoder with skip connections
+        x = self.upconv4(x)
+        x = torch.cat([x, enc4], dim=1)  # Skip connection
+        x = self.dec4(x)
+        
+        x = self.upconv3(x)
+        x = torch.cat([x, enc3], dim=1)
+        x = self.dec3(x)
+        
+        x = self.upconv2(x)
+        x = torch.cat([x, enc2], dim=1)
+        x = self.dec2(x)
+        
+        x = self.upconv1(x)
+        x = torch.cat([x, enc1], dim=1)
+        x = self.dec1(x)
+        
+        # Final output
+        x = self.final(x)
         
         return x
 
 
 # ============================================================================
-# FCN - FULLY CONVOLUTIONAL NETWORKS
-# ============================================================================
-
-class FCN(nn.Module):
-    """
-    Fully Convolutional Networks para segmentación.
-    
-    Backbone: VGG16 o ResNet
-    Decoder: Convoluciones transpuestas
-    """
-    
-    def __init__(self, in_channels, out_channels, backbone='vgg16', aux_loss=False):
-        super().__init__()
-        
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.aux_loss = aux_loss
-        
-        if backbone == 'vgg16':
-            self._init_vgg16_backbone()
-        elif backbone == 'resnet50':
-            self._init_resnet50_backbone()
-        else:
-            raise ValueError(f"Backbone no soportado: {backbone}")
-        
-        # Decoder
-        self.decoder = nn.Sequential(
-            nn.Conv2d(512, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-        )
-        
-        # Head
-        self.head = nn.Conv2d(32, out_channels, kernel_size=1)
-        
-        # Aux head (si es necesario)
-        if aux_loss:
-            self.aux_head = nn.Conv2d(256, out_channels, kernel_size=1)
-    
-    def _init_vgg16_backbone(self):
-        """Inicializar backbone VGG16"""
-        vgg = models.vgg16(pretrained=True)
-        self.encoder = nn.Sequential(*list(vgg.features.children())[:-1])
-    
-    def _init_resnet50_backbone(self):
-        """Inicializar backbone ResNet50"""
-        resnet = models.resnet50(pretrained=True)
-        self.encoder = nn.Sequential(
-            resnet.conv1,
-            resnet.bn1,
-            resnet.relu,
-            resnet.maxpool,
-            resnet.layer1,
-            resnet.layer2,
-            resnet.layer3,
-            resnet.layer4,
-        )
-    
-    def forward(self, x):
-        # Backbone
-        features = self.encoder(x)
-        
-        # Decoder
-        out = self.decoder(features)
-        
-        # Head
-        out = self.head(out)
-        
-        # Upsample final para recuperar tamaño original
-        out = F.interpolate(out, size=x.shape[2:], mode='bilinear', align_corners=False)
-        
-        if self.aux_loss:
-            aux_out = self.aux_head(features)
-            aux_out = F.interpolate(aux_out, size=x.shape[2:], mode='bilinear', align_corners=False)
-            return out, aux_out
-        
-        return out
-
-
-# ============================================================================
-# DEEPLABV3
+# TASK 3: SEGMENTATION - DeepLabV3+
 # ============================================================================
 
 class ASPPModule(nn.Module):
-    """Atrous Spatial Pyramid Pooling"""
+    """Atrous Spatial Pyramid Pooling (ASPP)"""
     
-    def __init__(self, in_channels, out_channels, atrous_rates):
-        super().__init__()
+    def __init__(self, in_channels: int, out_channels: int, dilations: list = [1, 6, 12, 18]):
+        super(ASPPModule, self).__init__()
         
-        self.branches = nn.ModuleList()
+        modules = []
         
         # 1x1 convolution
-        self.branches.append(nn.Sequential(
+        modules.append(nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         ))
         
-        # 3x3 convolutions con atrous rates
-        for rate in atrous_rates:
-            self.branches.append(nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=3,
-                         dilation=rate, padding=rate),
+        # Atrous convolutions with different dilation rates
+        for dilation in dilations[1:]:
+            modules.append(nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, 
+                         padding=dilation, dilation=dilation),
                 nn.BatchNorm2d(out_channels),
                 nn.ReLU(inplace=True)
             ))
         
-        # Image pool
-        self.image_pool = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
+        # Image pooling
+        modules.append(nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
             nn.Conv2d(in_channels, out_channels, kernel_size=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
-        )
+        ))
         
+        self.convs = nn.ModuleList(modules)
+        
+        # Project concatenated features
         self.project = nn.Sequential(
-            nn.Conv2d(out_channels * (len(atrous_rates) + 2), out_channels,
-                     kernel_size=1),
+            nn.Conv2d(out_channels * (len(dilations) + 1), out_channels, kernel_size=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5)
+            nn.ReLU(inplace=True)
         )
     
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h, w = x.shape[-2:]
         res = []
-        for branch in self.branches:
-            res.append(branch(x))
         
-        # Image pool
-        pool = self.image_pool(x)
-        pool = F.interpolate(pool, size=x.shape[2:], mode='bilinear', align_corners=False)
+        for conv in self.convs[:-1]:
+            res.append(conv(x))
+        
+        # Image pooling
+        pool = self.convs[-1](x)
+        pool = F.interpolate(pool, size=(h, w), mode='bilinear', align_corners=False)
         res.append(pool)
         
-        # Concatenar y proyectar
-        out = torch.cat(res, dim=1)
-        out = self.project(out)
+        # Concatenate
+        x = torch.cat(res, dim=1)
+        x = self.project(x)
         
-        return out
+        return x
 
 
-class DeepLabV3(nn.Module):
+class DeepLabV3Plus(nn.Module):
     """
-    DeepLab V3 para segmentación semántica.
-    
-    Backbone: ResNet50 o ResNet101
-    Atrous convolutions + ASPP
+    DeepLabV3+ for medical image segmentation
+    Backbone: ResNet50 with dilated convolutions
+    ASPP: Multi-scale feature extraction
+    Decoder: Combines low-level and high-level features
     """
     
-    def __init__(self, in_channels, out_channels, backbone='resnet50', 
-                 atrous_rates=(6, 12, 18), aspp_channels=256):
-        super().__init__()
+    def __init__(self, in_channels: int = 1, out_channels: int = 1):
+        """
+        Initialize DeepLabV3+
         
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        Args:
+            in_channels: Input channels (1 for grayscale)
+            out_channels: Output channels (1 for binary segmentation)
+        """
+        super(DeepLabV3Plus, self).__init__()
         
-        # Backbone
-        if backbone == 'resnet50':
-            resnet = models.resnet50(pretrained=True)
-            backbone_channels = 2048
-        elif backbone == 'resnet101':
-            resnet = models.resnet101(pretrained=True)
-            backbone_channels = 2048
-        else:
-            raise ValueError(f"Backbone no soportado: {backbone}")
+        # Load ResNet50 backbone
+        resnet = torchvision.models.resnet50(pretrained=True)
         
-        # Adaptar primer layer si es necesario
-        if in_channels != 3:
-            resnet.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3)
+        # Adapt first layer for 1-channel input
+        self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
         
-        self.backbone = nn.Sequential(
-            resnet.conv1,
-            resnet.bn1,
-            resnet.relu,
-            resnet.maxpool,
-            resnet.layer1,
-            resnet.layer2,
-            resnet.layer3,
-            resnet.layer4,
-        )
+        # Copy ResNet50 layers
+        self.bn1 = resnet.bn1
+        self.relu = resnet.relu
+        self.maxpool = resnet.maxpool
         
-        # ASPP
-        self.aspp = ASPPModule(backbone_channels, aspp_channels, atrous_rates)
+        # Dilated ResNet layers
+        self.layer1 = resnet.layer1
+        self.layer2 = resnet.layer2
+        self.layer3 = self._make_dilated_layer(resnet.layer3, dilation=2)
+        self.layer4 = self._make_dilated_layer(resnet.layer4, dilation=4)
+        
+        # ASPP module
+        self.aspp = ASPPModule(in_channels=2048, out_channels=256)
         
         # Decoder
         self.decoder = nn.Sequential(
-            nn.Conv2d(aspp_channels, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.Conv2d(256 + 256, 128, kernel_size=3, padding=1),
             nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
-            
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(inplace=True),
+            nn.Conv2d(128, out_channels, kernel_size=1),
+            nn.Sigmoid()  # Binary output
         )
         
-        # Head
-        self.head = nn.Conv2d(64, out_channels, kernel_size=1)
+        # Low-level feature projection
+        self.low_level_proj = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
     
-    def forward(self, x):
+    def _make_dilated_layer(self, layer: nn.Module, dilation: int) -> nn.Module:
+        """Convert layer to use dilated convolutions"""
+        for m in layer.modules():
+            if isinstance(m, nn.Conv2d):
+                if m.kernel_size == (3, 3):
+                    m.dilation = (dilation, dilation)
+                    m.padding = (dilation, dilation)
+        return layer
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass
+        
+        Args:
+            x: Input tensor (B, 1, 512, 512)
+        
+        Returns:
+            output: (B, 1, 512, 512) segmentation mask probabilities
+        """
+        h, w = x.shape[-2:]
+        
         # Backbone
-        features = self.backbone(x)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)  # 1/4
+        
+        x1 = self.layer1(x)  # 1/4, 256 channels
+        x2 = self.layer2(x1)  # 1/8, 512 channels
+        x3 = self.layer3(x2)  # 1/16, 1024 channels
+        x4 = self.layer4(x3)  # 1/32, 2048 channels
         
         # ASPP
-        aspp_out = self.aspp(features)
-        aspp_out = F.interpolate(aspp_out, size=features.shape[2:],
-                                  mode='bilinear', align_corners=False)
+        x = self.aspp(x4)  # 1/32, 256 channels
+        x = F.interpolate(x, size=(h // 4, w // 4), mode='bilinear', align_corners=False)
         
-        # Decoder
-        out = self.decoder(aspp_out)
+        # Decoder with skip connection from layer1
+        x1_proj = self.low_level_proj(x1)  # Project to 256 channels
+        x = torch.cat([x, x1_proj], dim=1)  # Concatenate
+        x = F.interpolate(x, size=(h, w), mode='bilinear', align_corners=False)
         
-        # Head
-        out = self.head(out)
+        # Final decoder
+        x = self.decoder(x)
         
-        # Upsample final
-        out = F.interpolate(out, size=x.shape[2:], mode='bilinear', align_corners=False)
-        
-        return out
+        return x
 
 
 # ============================================================================
-# FACTORY FUNCTION
+# Factory Functions
 # ============================================================================
 
-def create_model(model_name, in_channels, out_channels, **kwargs):
+def get_classification_model(model_name: str = 'densenet121',
+                            num_classes: int = 3,
+                            pretrained: bool = True) -> nn.Module:
     """
-    Factory function para crear modelos.
+    Get classification model
     
     Args:
-        model_name: 'unet', 'fcn', 'deeplabv3'
-        in_channels: Canales de entrada (1 para grayscale)
-        out_channels: Canales de salida (1 para segmentación binaria)
-        **kwargs: Parámetros adicionales según modelo
+        model_name: 'densenet121', 'resnet50', etc.
+        num_classes: Number of classes
+        pretrained: Use pre-training
     
     Returns:
-        Modelo instantiado
+        Model instance
     """
-    if model_name == 'unet':
-        return UNet(in_channels, out_channels, **kwargs)
-    elif model_name == 'fcn':
-        return FCN(in_channels, out_channels, **kwargs)
-    elif model_name == 'deeplabv3':
-        return DeepLabV3(in_channels, out_channels, **kwargs)
+    if model_name.lower() == 'densenet121':
+        return DenseNet121Classifier(num_classes=num_classes, pretrained=pretrained)
     else:
-        raise ValueError(f"Modelo no reconocido: {model_name}")
+        raise ValueError(f"Unknown classification model: {model_name}")
 
 
-# Test de uso
-if __name__ == "__main__":
-    # Test U-Net
-    print("Testing U-Net...")
-    unet = UNet(1, 1)  # 1 canal entrada, 1 canal salida (máscara binaria)
-    x = torch.randn(2, 1, 512, 512)
-    y = unet(x)
-    print(f"  Input: {x.shape}")
-    print(f"  Output: {y.shape}")
-    print(f"  Parameters: {sum(p.numel() for p in unet.parameters()):,}")
+def get_detection_model(model_name: str = 'mask_rcnn',
+                       num_classes: int = 2,
+                       pretrained: bool = True) -> nn.Module:
+    """
+    Get detection model
     
-    # Test FCN
-    print("\nTesting FCN...")
-    fcn = FCN(1, 1, backbone='vgg16')
-    y = fcn(x)
-    print(f"  Input: {x.shape}")
-    print(f"  Output: {y.shape}")
-    print(f"  Parameters: {sum(p.numel() for p in fcn.parameters()):,}")
+    Args:
+        model_name: 'mask_rcnn'
+        num_classes: Number of classes
+        pretrained: Use pre-training
     
-    # Test DeepLab V3
-    print("\nTesting DeepLab V3...")
-    deeplab = DeepLabV3(1, 1, backbone='resnet50')
-    y = deeplab(x)
-    print(f"  Input: {x.shape}")
-    print(f"  Output: {y.shape}")
-    print(f"  Parameters: {sum(p.numel() for p in deeplab.parameters()):,}")
+    Returns:
+        Model instance
+    """
+    if model_name.lower() == 'mask_rcnn':
+        return get_mask_rcnn(num_classes=num_classes, pretrained=pretrained)
+    else:
+        raise ValueError(f"Unknown detection model: {model_name}")
+
+
+def get_segmentation_model(model_name: str = 'unet',
+                          in_channels: int = 1,
+                          out_channels: int = 1) -> nn.Module:
+    """
+    Get segmentation model
+    
+    Args:
+        model_name: 'unet' or 'deeplabv3'
+        in_channels: Input channels
+        out_channels: Output channels
+    
+    Returns:
+        Model instance
+    """
+    if model_name.lower() == 'unet':
+        return UNet(in_channels=in_channels, out_channels=out_channels)
+    elif model_name.lower() == 'deeplabv3':
+        return DeepLabV3Plus(in_channels=in_channels, out_channels=out_channels)
+    else:
+        raise ValueError(f"Unknown segmentation model: {model_name}")

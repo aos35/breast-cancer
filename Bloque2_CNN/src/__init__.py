@@ -1,37 +1,55 @@
-"""
-Bloque2_CNN - CNN para Segmentación de Lesiones Mamarias
+"""Bloque2_CNN - Multi-Task CNN Pipeline for Breast Cancer Detection"""
 
-Módulos:
-- data_loader: Carga de TIFF, Masks, PLA desde DMID_PNG
-- models: Arquitecturas (U-Net, FCN, DeepLab V3)
-- utils: Funciones auxiliares (loss, metrics, visualization)
-- train: Loop de entrenamiento
-- evaluate: Evaluación en test set
-"""
-
-from .data_loader import DMIDSegmentationDataset, SegmentationDataModule
-from .models import UNet, FCN, DeepLabV3, create_model
+from .data_loader import MetadataLoader, DMIDMultiTaskDataset, create_data_loaders
+from .models import (
+    DenseNet121Classifier,
+    get_mask_rcnn,
+    UNet,
+    DeepLabV3Plus,
+    get_classification_model,
+    get_detection_model,
+    get_segmentation_model
+)
 from .utils import (
+    ClassificationLoss,
     DiceLoss,
-    IoULoss,
-    CombinedLoss,
-    SegmentationMetrics,
-    visualize_segmentation
+    BCEWithLogitsLoss,
+    CombinedSegmentationLoss,
+    classification_metrics,
+    segmentation_metrics,
+    detection_metrics,
+    get_class_weights,
+    normalize_image,
+    postprocess_segmentation
 )
 
 __version__ = "1.0.0"
-__author__ = "Estudiante Redes Neuronales"
+__author__ = "Proyecto Redes Neuronales 2026"
 
 __all__ = [
-    'DMIDSegmentationDataset',
-    'SegmentationDataModule',
+    # Data
+    'MetadataLoader',
+    'DMIDMultiTaskDataset',
+    'create_data_loaders',
+    
+    # Models
+    'DenseNet121Classifier',
+    'get_mask_rcnn',
     'UNet',
-    'FCN',
-    'DeepLabV3',
-    'create_model',
+    'DeepLabV3Plus',
+    'get_classification_model',
+    'get_detection_model',
+    'get_segmentation_model',
+    
+    # Utils
+    'ClassificationLoss',
     'DiceLoss',
-    'IoULoss',
-    'CombinedLoss',
-    'SegmentationMetrics',
-    'visualize_segmentation',
+    'BCEWithLogitsLoss',
+    'CombinedSegmentationLoss',
+    'classification_metrics',
+    'segmentation_metrics',
+    'detection_metrics',
+    'get_class_weights',
+    'normalize_image',
+    'postprocess_segmentation'
 ]
