@@ -55,7 +55,8 @@ augmentation:
 # MODEL CONFIGURATION
 # ============================================================================
 model:
-  # Tipo de modelo: 'unet', 'fcn', 'deeplabv3'
+  # Tipo de modelo: 'unet', 'segnet', 'deeplabv3'
+  # (ver ARQUITECTURAS_JUSTIFICACION.md para detalles)
   type: "unet"
   
   # Parámetros específicos por modelo
@@ -67,11 +68,12 @@ model:
     out_channels: 1           # Salida binaria (Masks)
     dropout: 0.2
   
-  fcn:
-    backbone: "vgg16"         # "vgg16" o "resnet50"
-    in_channels: 1
-    out_channels: 1
-    aux_loss: false           # Loss auxiliar en intermediate layers
+  segnet:
+    encoder: "vgg16"          # "vgg16" para encoder
+    in_channels: 1            # Escala de grises
+    out_channels: 1           # Salida binaria (Masks)
+    dropout: 0.2
+    # SegNet es mejor que FCN en precisión de bordes (ver literatura)
   
   deeplabv3:
     backbone: "resnet50"      # "resnet50" o "resnet101"

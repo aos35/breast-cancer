@@ -26,9 +26,9 @@ breast-cancer/
     │   │   ├── DMIDSegmentationDataset
     │   │   └── SegmentationDataModule
     │   ├── models.py                   (8 KB)  Arquitecturas CNN
-    │   │   ├── UNet
-    │   │   ├── FCN
-    │   │   ├── DeepLabV3
+    │   │   ├── UNet (1.9M params)
+    │   │   ├── SegNet (29M params)
+    │   │   ├── DeepLabV3+ (39.5M params)
     │   │   └── create_model()
     │   ├── utils.py                    (6 KB)  Funciones auxiliares
     │   │   ├── DiceLoss
@@ -51,9 +51,9 @@ breast-cancer/
     │       └── masks/
     │
     ├── 🤖 models/                      Modelos entrenados
-    │   ├── unet_best.pth               Mejor modelo U-Net
-    │   ├── fcn_best.pth                Mejor modelo FCN
-    │   ├── deeplabv3_best.pth          Mejor modelo DeepLab V3
+    │   ├── unet_best.pth               Mejor modelo U-Net (baseline)
+    │   ├── segnet_best.pth             Mejor modelo SegNet
+    │   ├── deeplabv3_best.pth          Mejor modelo DeepLab V3+
     │   └── training_logs.txt           Logs de entrenamiento
     │
     └── 📊 results/                     Resultados finales
@@ -99,14 +99,20 @@ jupyter notebook notebooks/00_exploracion.ipynb
 # 3. Preprocesamiento
 jupyter notebook notebooks/01_preprocesamiento.ipynb
 
-# 4. Entrenamiento
+# 4. Entrenamiento (comparación de 3 arquitecturas)
 jupyter notebook notebooks/02_segmentacion_baseline.ipynb
 
-# 5. Evaluación
+# 5. Evaluación y análisis comparativo
 jupyter notebook notebooks/03_evaluacion.ipynb
 ```
 
-## 📚 DOCUMENTACIÓN DETALLADA
+## 🎯 **CARACTERÍSTICAS**
+
+✅ **Dataset Configurado**: DMID_PNG (511 TIFF, 269 Masks, 269 PLA)  
+✅ **3 Arquitecturas CNN** (seleccionadas según literatura - resumen.txt):
+- **U-Net** (1.9M params) - "Gold standard en segmentación médica"
+- **SegNet** (29M params) - "Mejor precisión de bordes que FCN"
+- **DeepLab V3+** (39.5M params) - "State-of-the-art en segmentación"
 
 ### 1. README.md
 Descripción completa del proyecto:
@@ -176,14 +182,14 @@ model = create_model('unet', in_channels=1, out_channels=1)
 
 **Modelos**:
 1. **U-Net** - 1.9M parámetros
-   - Baseline para segmentación médica
+   - Gold standard en segmentación médica
    - Encoder-decoder con skip connections
    
-2. **FCN** - 29.4M parámetros
-   - Fully Convolutional Networks
-   - Backbone: VGG16 o ResNet50
+2. **SegNet** - 29M parámetros
+   - Mejor precisión de bordes que FCN
+   - Max-pooling indices para upsampling eficiente
    
-3. **DeepLab V3** - 39.5M parámetros
+3. **DeepLab V3+** - 39.5M parámetros
    - State-of-the-art en segmentación
    - ASPP + Atrous convolutions
 
@@ -279,30 +285,30 @@ from src.utils import DiceLoss, SegmentationMetrics
 │ 1. SETUP     │ pip install -r requirements.txt
 └──────┬───────┘
        ↓
-┌──────────────────────┐
-│ 2. EXPLORACIÓN       │ 00_exploracion.ipynb
-│ (1-2 horas)          │
-└──────┬───────────────┘
+┌──────────────────────────────────────────┐
+│ 2. EXPLORACIÓN                           │ 00_exploracion.ipynb
+│ (1-2 horas) - EDA de TIFF/Masks/PLA     │
+└──────┬───────────────────────────────────┘
        ↓
-┌──────────────────────┐
-│ 3. PREPROCESAMIENTO  │ 01_preprocesamiento.ipynb
-│ (1-2 horas)          │
-└──────┬───────────────┘
+┌──────────────────────────────────────────┐
+│ 3. PREPROCESAMIENTO                      │ 01_preprocesamiento.ipynb
+│ (1-2 horas) - Normalización, augmenta...│
+└──────┬───────────────────────────────────┘
        ↓
-┌──────────────────────┐
-│ 4. MODELADO          │ 02_segmentacion_baseline.ipynb
-│ (2-3 horas)          │
-└──────┬───────────────┘
+┌──────────────────────────────────────────┐
+│ 4. MODELADO & COMPARACIÓN                │ 02_segmentacion_baseline.ipynb
+│ (2-3 horas) - U-Net vs SegNet vs DeepLab│
+└──────┬───────────────────────────────────┘
        ↓
-┌──────────────────────┐
-│ 5. EVALUACIÓN        │ 03_evaluacion.ipynb
-│ (1-2 horas)          │
-└──────┬───────────────┘
+┌──────────────────────────────────────────┐
+│ 5. EVALUACIÓN                            │ 03_evaluacion.ipynb
+│ (1-2 horas) - Métricas (IoU, Dice, etc) │
+└──────┬───────────────────────────────────┘
        ↓
-┌──────────────────────┐
-│ 6. REPORTE FINAL     │ Documento con resultados
-│ (1-2 horas)          │
-└──────────────────────┘
+┌──────────────────────────────────────────┐
+│ 6. REPORTE FINAL & ANÁLISIS COMPARATIVO  │ Documento con resultados
+│ (1-2 horas) - Conclusiones y mejoras     │
+└──────────────────────────────────────────┘
 ```
 
 **Tiempo Total**: ~8-14 horas de trabajo
@@ -313,8 +319,14 @@ Al finalizar deberías tener:
 
 ✅ **Modelos Entrenados**
 - U-Net con IoU > 0.75
-- FCN con IoU > 0.70
-- DeepLab V3 con IoU > 0.80
+- SegNet con IoU > 0.80 (mejor que FCN en precisión de bordes)
+- DeepLab V3+ con IoU > 0.85
+
+✅ **Análisis Comparativo**
+- Tabla de rendimiento (U-Net vs SegNet vs DeepLab V3+)
+- Gráficos de convergencia
+- Curvas de validación
+- Tiempo de entrenamiento/inferencia
 
 ✅ **Máscaras Predichas**
 - Predicciones en todo el test set
@@ -359,10 +371,25 @@ Al finalizar deberías tener:
 - [ ] Setup completado (venv + dependencias)
 - [ ] Dataset explorado (notebooks/00_exploracion.ipynb)
 - [ ] Datos preparados (notebooks/01_preprocesamiento.ipynb)
-- [ ] Modelo entrenado (notebooks/02_segmentacion_baseline.ipynb)
+- [ ] 3 Modelos entrenados: U-Net, SegNet, DeepLab V3+
 - [ ] Evaluación completada (notebooks/03_evaluacion.ipynb)
+- [ ] Comparación cuantitativa (IoU, Dice, tiempo/epoch)
+- [ ] Análisis de bordes (SegNet vs U-Net vs DeepLab V3+)
 - [ ] Resultados guardados en results/
-- [ ] Reporte final escrito
+- [ ] Reporte final con análisis comparativo escrito
+
+## 📝 JUSTIFICACIÓN FINAL DE ARQUITECTURAS
+
+**Según resumen.txt (Sección 4.2 - Arquitecturas para Segmentación)**:
+
+| Arquitectura | Literatura | Inclusión |
+|---|---|---|
+| **U-Net** | "Gold standard en segmentación médica" | ✅ SÍ - Baseline |
+| **SegNet** | "Mejor que FCN en límites" | ✅ SÍ - Optimizado |
+| **FCN** | "Rápido pero MENOS PRECISO en detalles" | ❌ NO - Reemplazado |
+| **DeepLab V3+** | "Estado del arte en segmentación general" | ✅ SÍ - SOTA |
+
+**Razón del cambio**: FCN no es óptima para mamografía (baja precisión en bordes). SegNet mejora significativamente la precisión de bordes usando max-pooling indices, crítico para detectar límites de tumores.
 
 ## 📝 NOTAS IMPORTANTES
 

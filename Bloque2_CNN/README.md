@@ -75,7 +75,7 @@ Bloque2_CNN/
 ├── src/                        # Código Python
 │   ├── __init__.py
 │   ├── data_loader.py          # Carga de TIFF, Masks, PLA
-│   ├── models.py               # Arquitecturas: U-Net, FCN, DeepLab
+│   ├── models.py               # Arquitecturas: U-Net, SegNet, DeepLabV3+
 │   ├── utils.py                # Funciones auxiliares
 │   ├── train.py                # Loop de entrenamiento
 │   └── evaluate.py             # Evaluación de modelos
@@ -87,7 +87,8 @@ Bloque2_CNN/
 │
 ├── models/                     # Modelos entrenados
 │   ├── unet_best.pth
-│   ├── fcn_best.pth
+│   ├── segnet_best.pth
+│   ├── deeplabv3_best.pth
 │   └── training_logs.txt
 │
 └── results/                    # Resultados y visualizaciones
@@ -114,9 +115,9 @@ Bloque2_CNN/
 
 ### Fase 3: Modelado (Semana 2-3)
 - [ ] Implementar arquitecturas:
-  - [ ] U-Net (baseline para segmentación)
-  - [ ] FCN (Fully Convolutional Networks)
-  - [ ] DeepLab v3 (state-of-the-art)
+  - [ ] U-Net (gold standard - baseline para segmentación médica)
+  - [ ] SegNet (mejor precisión de bordes)
+  - [ ] DeepLab V3+ (state-of-the-art)
 - [ ] Definir loss functions (Dice, CrossEntropy, Focal Loss)
 - [ ] Resumen en `src/models.py`
 
@@ -177,29 +178,49 @@ Bloque2_CNN/
 
 ## Modelos a Implementar
 
-### 1. U-Net (Baseline)
+**Selección basada en literatura (resumen.txt - Sección 4.2)**:
+
+### 1. U-Net (1.9M params) - GOLD STANDARD
 ```
 Architecture: Encoder-Decoder con Skip Connections
+Fuente: Ronneberger et al., 2015
+Ventaja: "Gold standard en segmentación médica"
 Input: 512x512 (o 1024x1024)
 Output: Máscara binaria (0=fondo, 1=lesión)
-Parámetros: ~7M
+Ideal para: Datos pequeños (269 muestras), detalles locales
 ```
 
-### 2. FCN (Fully Convolutional Networks)
+### 2. SegNet (29M params) - MEJOR QUE FCN
 ```
-Architecture: Convoluciones sin fully-connected
+Architecture: Encoder-Decoder con Max-Pooling Indices
+Fuente: Badrinarayanan et al., 2015
+Ventaja: "Mejor que FCN en límites" (según literatura)
 Input: Imagen TIFF variable
 Output: Máscara segmentada
-Parámetros: ~30M (con VGG16 backbone)
+Ideal para: Mayor precisión en bordes de lesiones vs FCN
 ```
 
-### 3. DeepLab V3
+### 3. DeepLab V3+ (39.5M params) - STATE-OF-THE-ART
 ```
-Architecture: Atrous Convolutions + ASPP
+Architecture: Atrous Convolutions + ASPP (Atrous Spatial Pyramid Pooling)
+Fuente: Chen et al., 2018
+Ventaja: "Estado del arte en segmentación general" (según literatura)
 Input: 512x512
 Output: Máscara + Anotación PLA
-Parámetros: ~40M
+Ideal para: Máximo rendimiento, contexto multi-escala
 ```
+
+### Justificación de Cambio (FCN → SegNet)
+
+**Según resumen.txt (Sección 4.2 - Arquitecturas para Segmentación)**:
+- FCN: "Rápido pero MENOS PRECISO en detalles"
+- SegNet: "Mejor que FCN en límites"
+- SegNet usa max-pooling indices para upsampling eficiente
+- Para mamografía: precisión de bordes = crítico (tumores tienen bordes bien-definidos)
+
+Por lo tanto:
+- Mantener U-Net + DeepLab V3+ (ya óptimas)
+- Cambiar FCN → SegNet (mejora precisión según literatura)
 
 ## Métricas de Evaluación
 
