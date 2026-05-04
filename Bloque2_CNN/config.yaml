@@ -1,0 +1,205 @@
+# Configuración para Bloque2_CNN - Segmentación de Lesiones Mamarias
+
+# ============================================================================
+# DATASET CONFIGURATION
+# ============================================================================
+dataset:
+  # Ruta del dataset DMID_PNG (ajustar según tu sistema)
+  # Windows: ../../data/raw/DMID_PNG
+  # Linux/Mac: ../../data/raw/DMID_PNG
+  base_path: "../../data/raw/DMID_PNG"
+  
+  # Resolución a usar: '512x512' o '1024x1024'
+  resolution: "512x512"
+  
+  # Subdirectorios dentro de base_path/{resolution}/
+  tiff_dir: "TIFF"
+  masks_dir: "Masks"
+  pla_dir: "PLA_PNG"  # O "PLA" dependiendo del sistema
+  
+  # División de datos
+  train_split: 0.6      # 60% entrenamiento
+  val_split: 0.2        # 20% validación
+  test_split: 0.2       # 20% test
+  
+  # Random seed para reproducibilidad
+  seed: 42
+
+# ============================================================================
+# DATA AUGMENTATION
+# ============================================================================
+augmentation:
+  enabled: true
+  
+  # Transformaciones
+  rotation_degrees: 15        # ±15 grados
+  horizontal_flip: true       # Flip horizontal
+  vertical_flip: true         # Flip vertical
+  zoom_range: [0.8, 1.2]      # 80%-120%
+  
+  # Elastic deformations (común en datos médicos)
+  elastic_deform: true
+  elastic_alpha: [30, 40]
+  elastic_sigma: 3
+  
+  # Ruido y blur
+  gaussian_noise: 0.01        # σ=0.01
+  elastic_probability: 0.3    # 30% de probabilidad
+  
+  # Normalización
+  normalize: true
+  mean: [0.5]                 # Para imágenes en escala de grises
+  std: [0.5]
+
+# ============================================================================
+# MODEL CONFIGURATION
+# ============================================================================
+model:
+  # Tipo de modelo: 'unet', 'fcn', 'deeplabv3'
+  type: "unet"
+  
+  # Parámetros específicos por modelo
+  unet:
+    encoder_depth: 4          # Profundidad del encoder
+    decoder_channels: [256, 128, 64, 32]
+    encoder_channels: [3, 64, 128, 256, 512]
+    in_channels: 1            # Escala de grises
+    out_channels: 1           # Salida binaria (Masks)
+    dropout: 0.2
+  
+  fcn:
+    backbone: "vgg16"         # "vgg16" o "resnet50"
+    in_channels: 1
+    out_channels: 1
+    aux_loss: false           # Loss auxiliar en intermediate layers
+  
+  deeplabv3:
+    backbone: "resnet50"      # "resnet50" o "resnet101"
+    in_channels: 1
+    out_channels: 1
+    atrous_rates: [6, 12, 18]
+    aspp_channels: 256
+
+# ============================================================================
+# TRAINING CONFIGURATION
+# ============================================================================
+training:
+  # Dispositivo
+  device: "cuda"              # "cuda" o "cpu"
+  
+  # Hiperparámetros
+  epochs: 200
+  batch_size: 16              # Reducido para segmentación (GPU memory)
+  learning_rate: 0.001
+  weight_decay: 1e-4
+  
+  # Optimizer
+  optimizer: "adam"           # "adam", "sgd", "adamw"
+  
+  # Learning rate scheduler
+  scheduler: "cosine"         # "cosine", "exponential", "step"
+  scheduler_params:
+    T_max: 200                # Para cosine
+    
+  # Loss function
+  loss_fn: "dice"             # "dice", "bce", "focal", "combined"
+  
+  # Loss weights (si hay múltiples outputs)
+  loss_weights:
+    masks: 1.0
+    pla: 0.5                  # Si también predices PLA
+  
+  # Early stopping
+  early_stopping:
+    enabled: true
+    patience: 30              # Épocas sin mejora antes de parar
+    min_delta: 0.001          # Mejora mínima para resetear patience
+  
+  # Checkpoint saving
+  checkpoint:
+    save_best: true
+    save_interval: 10         # Guardar cada 10 épocas
+    keep_best_k: 3            # Guardar top 3 modelos
+
+# ============================================================================
+# VALIDATION & METRICS
+# ============================================================================
+validation:
+  # Frecuencia de validación
+  validate_every: 1           # Cada N épocas
+  
+  # Métricas a calcular
+  metrics:
+    - "iou"                   # Intersection over Union
+    - "dice"                  # Dice coefficient
+    - "accuracy"              # Accuracy
+    - "precision"             # Precision
+    - "recall"                # Recall
+    - "f1"                    # F1 score
+  
+  # Threshold para binarización (si es necesario)
+  threshold: 0.5
+
+# ============================================================================
+# EVALUATION CONFIGURATION
+# ============================================================================
+evaluation:
+  # Generar predicciones en test set
+  generate_predictions: true
+  
+  # Visualizaciones
+  save_visualizations: true
+  num_samples: 10             # Número de samples a visualizar
+  
+  # Comparación con ground truth
+  compute_metrics: true
+  
+  # Salvar resultados
+  save_results: true
+  results_dir: "./results"
+
+# ============================================================================
+# LOGGING & MONITORING
+# ============================================================================
+logging:
+  # Level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+  level: "INFO"
+  
+  # Tensorboard
+  tensorboard:
+    enabled: true
+    log_dir: "./runs"
+  
+  # Wandb (Weights & Biases)
+  wandb:
+    enabled: false            # Activar si tienes cuenta
+    project: "breast-cancer-segmentation"
+    entity: "username"        # Tu usuario de wandb
+  
+  # Frecuencia de logging
+  log_interval: 10            # Cada N batches
+
+# ============================================================================
+# PATHS
+# ============================================================================
+paths:
+  # Directorio base del proyecto
+  project_root: "./"
+  
+  # Subdirectorios
+  data_dir: "./data"
+  models_dir: "./models"
+  results_dir: "./results"
+  logs_dir: "./logs"
+  
+  # Archivos de checkpoint
+  best_model: "./models/best_model.pth"
+  last_model: "./models/last_model.pth"
+
+# ============================================================================
+# REPRODUCIBILITY
+# ============================================================================
+reproducibility:
+  seed: 42
+  deterministic: true
+  benchmark: false            # Desactivar para resultados deterministas
