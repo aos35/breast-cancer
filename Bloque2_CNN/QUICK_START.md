@@ -17,8 +17,7 @@ Guía rápida para empezar con el pipeline de 3 tareas: Clasificación → Detec
 
 ### 1. Create Virtual Environment
 ```bash
-# From proyecto/ folder
-cd breast-cancer/Bloque2_CNN
+cd Bloque2_CNN
 python -m venv venv
 
 # Windows
@@ -50,8 +49,7 @@ print(f"GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'N
 Your project folder should have:
 ```
 proyecto/
-├── breast-cancer/
-│   └── Bloque2_CNN/      (this folder)
+├── Bloque2_CNN/          (this folder)
 ├── DMID_PNG/             (511 TIFF images)
 │   ├── IMG001.tif
 │   ├── IMG002.tif
@@ -70,7 +68,7 @@ proyecto/
 from src.data_loader import MetadataLoader
 from pathlib import Path
 
-metadata_loader = MetadataLoader('../../Metadata.xlsx')
+metadata_loader = MetadataLoader('../Metadata.xlsx')
 
 # Check metadata
 print(f"Total records: {len(metadata_loader.df)}")
@@ -78,7 +76,7 @@ print(f"Class distribution:")
 print(metadata_loader.df['Class_Abnormality'].value_counts(dropna=False))
 
 # Verify image files
-tiff_dir = Path('../../DMID_PNG')
+tiff_dir = Path('../DMID_PNG')
 print(f"TIFF images: {len(list(tiff_dir.glob('*.tif')))}")
 print(f"Masks: {len(list(tiff_dir / 'masks').glob('*.npy'))}")
 print(f"PLAs: {len(list(tiff_dir / 'pla').glob('*.npy'))}")

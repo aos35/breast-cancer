@@ -11,11 +11,11 @@ project:
 ---
 ## DATA CONFIGURATION
 data:
-  # Paths (relative to Bloque2_CNN/)
-  tiff_dir: "../../DMID_PNG/"                # Imagen mamografías
-  masks_dir: "../../DMID_PNG/masks/"         # Ground truth segmentación (269 images)
-  pla_dir: "../../DMID_PNG/pla/"             # Pixel-level annotation (269 images)
-  metadata_path: "../../Metadata.xlsx"       # Etiquetas clasificación
+  # Paths
+  tiff_dir: "../DMID_PNG/"                   # Imagen mamografías
+  masks_dir: "../DMID_PNG/masks/"            # Ground truth segmentación (269 images)
+  pla_dir: "../DMID_PNG/pla/"                # Pixel-level annotation (269 images)
+  metadata_path: "../Metadata.xlsx"          # Etiquetas clasificación
   
   # Dataset stats
   total_images: 511                          # Total TIFF images
