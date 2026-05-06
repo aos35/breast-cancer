@@ -5,7 +5,7 @@
 # Note: torch, torchvision, torchaudio should be installed separately with the correct index
 # Model Architectures
 segmentation-models-pytorch==0.3.0
-timm==0.9.12                              # Timm models (updated)
+timm==0.4.12                              # Timm models (updated)
 
 # Medical Imaging
 pydicom==2.4.4                            # DICOM reading
@@ -25,7 +25,7 @@ scipy==1.11.4
 
 # Metrics & Evaluation
 scikit-learn==1.3.2
-torchmetrics==0.14.1
+torchmetrics==1.0.3
 matplotlib==3.8.2
 seaborn==0.13.0
 
@@ -34,7 +34,7 @@ PyYAML==6.0.1
 python-dotenv==1.0.0
 
 # Excel/Metadata
-openpyxl==3.11.0                         # Read Metadata.xlsx
+openpyxl==3.1.2                         # Read Metadata.xlsx
 xlrd==2.0.1                               # Excel support
 
 # Utilities
@@ -50,11 +50,3 @@ notebook==6.5.3
 ipython==8.13.2
 ipywidgets==8.0.6
 
-# Code Quality (optional)
-black==23.5.0
-flake8==6.0.0
-pylint==2.17.4
-
-# Documentation (optional)
-sphinx==7.0.1
-sphinx-rtd-theme==1.2.0

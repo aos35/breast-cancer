@@ -1,22 +1,21 @@
 # Configuration File for Bloque2_CNN - Multi-Task Breast Cancer Detection Pipeline
 # May 2026
 
----
+
 project:
   name: "Bloque2_CNN"
   description: "Classification + Detection + Segmentation Pipeline for Breast Cancer"
   version: "1.0"
   dataset: "DMID (Digital Mammography Image Dataset)"
 
----
+
 ## DATA CONFIGURATION
 data:
   # Paths
   tiff_dir: "../DMID_PNG/"                   # Imagen mamografías
   masks_dir: "../DMID_PNG/masks/"            # Ground truth segmentación (269 images)
   pla_dir: "../DMID_PNG/pla/"                # Pixel-level annotation (269 images)
-  metadata_path: "../Metadata.xlsx"          # Etiquetas clasificación
-  
+  metadata_path: C:/Users/aleja/Desktop/3ANYO/redesNeuronales/proyecto/Metadata.xlsx
   # Dataset stats
   total_images: 511                          # Total TIFF images
   annotated_images: 269                      # Con Mask + PLA
@@ -56,7 +55,7 @@ data:
     elastic_alpha: 30                        # Para elastic deformations
     elastic_sigma: 5
 
----
+
 ## TASK 1: CLASSIFICATION (Benign/Malignant/Negative)
 classification:
   # Model architecture
@@ -96,7 +95,7 @@ classification:
   save_dir: "./models/classification/"
   checkpoint_interval: 10                    # Save every N epochs
 
----
+
 ## TASK 2: DETECTION (Localize anomalies with bounding boxes)
 detection:
   # Model architecture
@@ -139,7 +138,7 @@ detection:
   score_threshold: 0.5                       # Min confidence for detections
   nms_threshold: 0.3                         # Non-Maximum Suppression
 
----
+
 ## TASK 3: SEGMENTATION (Delineate lesion boundaries)
 segmentation:
   # Models to train (can train both for comparison)
@@ -203,7 +202,6 @@ segmentation:
     remove_small_objects: true
     min_object_size: 50                      # pixels
 
----
 ## HARDWARE & TRAINING
 training:
   device: "cuda"                             # cuda or cpu
@@ -220,7 +218,6 @@ training:
   tensorboard: true
   save_interval: 100                         # Log every N batches
 
----
 ## EVALUATION
 evaluation:
   # Metrics thresholds
@@ -242,7 +239,7 @@ evaluation:
     n_splits: 5
     stratified: true                         # Stratified by class
 
----
+
 ## INFERENCE
 inference:
   batch_size: 32
@@ -253,7 +250,7 @@ inference:
     format: "png"
     dpi: 150
 
----
+
 ## PATHS (relative to Bloque2_CNN/)
 paths:
   data_root: "../"
@@ -263,7 +260,7 @@ paths:
   results_dir: "./results/"
   notebooks_dir: "./notebooks/"
 
----
+
 ## NOTES
 notes: |
   - Class imbalance handled by weighted loss (Classification)

@@ -29,7 +29,7 @@ from sklearn.metrics import (
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from src.data_loader import create_data_loaders
+from src.data_loader import create_data_loaders, MetadataLoader
 from src.models import (
     get_classification_model,
     get_detection_model,
@@ -47,6 +47,24 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _normalize_batch(batch):
+    if isinstance(batch, dict):
+        return batch
+
+    if isinstance(batch, list):
+        images = torch.stack([item['image'] for item in batch])
+        labels = torch.stack([item['classification_label'] for item in batch])
+        return {
+            'image': images,
+            'classification_label': labels,
+            'bbox': [item.get('bbox') for item in batch],
+            'mask': [item.get('mask') for item in batch],
+            'pla': [item.get('pla') for item in batch],
+        }
+
+    raise TypeError(f"Unsupported batch type: {type(batch)!r}")
 
 
 class ClassificationEvaluator:
@@ -89,8 +107,9 @@ class ClassificationEvaluator:
         
         with torch.no_grad():
             for batch in test_loader:
+                batch = _normalize_batch(batch)
                 images = batch['image'].to(self.device)
-                labels = batch['classification'].to(self.device)
+                labels = batch['classification_label'].to(self.device)
                 
                 outputs = self.model(images)
                 loss = loss_fn(outputs, labels)
@@ -224,11 +243,16 @@ class DetectionEvaluator:
         
         with torch.no_grad():
             for batch in test_loader:
-                images = batch['image'].to(self.device)
+                batch = _normalize_batch(batch)
+
+                images = batch['image']
+                if images.ndim == 3:
+                    images = images.unsqueeze(1)
+
+                images = [img.to(self.device) for img in images]
                 gt_bboxes = batch['bbox']
                 
-                # Forward pass (convert to 3-channel for Mask R-CNN)
-                outputs = self.model(images.unsqueeze(1).expand(-1, 3, -1, -1))
+                outputs = self.model(images)
                 
                 for pred_output, gt_bbox in zip(outputs, gt_bboxes):
                     pred_boxes = pred_output['boxes'].cpu().numpy()
@@ -335,13 +359,30 @@ class SegmentationEvaluator:
         
         with torch.no_grad():
             for batch in test_loader:
+                batch = _normalize_batch(batch)
                 images = batch['image'].to(self.device)
                 masks = batch['mask']
-                
-                if masks is None:
+
+                if isinstance(masks, list):
+                    valid_pairs = [
+                        (image, mask)
+                        for image, mask in zip(images, masks)
+                        if mask is not None
+                    ]
+                    if not valid_pairs:
+                        continue
+                    images = torch.stack([item[0] for item in valid_pairs]).to(self.device)
+                    masks = torch.stack([item[1] for item in valid_pairs]).to(self.device)
+                elif masks is None:
                     continue
                 
-                masks = masks.to(self.device).float().unsqueeze(1)
+                else:
+                    masks = masks.to(self.device)
+
+                if masks.ndim == 3:
+                    masks = masks.unsqueeze(1)
+
+                masks = masks.float()
                 
                 outputs = self.model(images)
                 preds = torch.sigmoid(outputs) > 0.5
@@ -406,10 +447,12 @@ def evaluate_classification(config_path='config.yaml', checkpoint_path='models/c
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
+    metadata_loader = MetadataLoader(config['data']['metadata_path'])
+
     _, _, test_loader = create_data_loaders(
-        config_path=config_path,
-        batch_size=config['classification']['batch_size'],
-        num_workers=4
+        config=config,
+        metadata_loader=metadata_loader,
+        batch_size=config['classification']['batch_size']
     )
     
     evaluator = ClassificationEvaluator(config, checkpoint_path, device=device)
@@ -430,7 +473,7 @@ def evaluate_detection(config_path='config.yaml', checkpoint_path='models/detect
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     _, _, test_loader = create_data_loaders(
-        config_path=config_path,
+        config=config,
         batch_size=config['detection']['batch_size'],
         num_workers=4
     )
@@ -457,7 +500,7 @@ def evaluate_segmentation(config_path='config.yaml', model_name='unet',
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
     _, _, test_loader = create_data_loaders(
-        config_path=config_path,
+        config=config,
         batch_size=config['segmentation']['batch_size'],
         num_workers=4
     )
