@@ -1,4 +1,8 @@
-.gitignore
-
 /DMID_PNG
 /data
+
+# Entornos virtuales
+venv/
+.venv/
+env/
+ENV/
